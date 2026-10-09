@@ -1,4 +1,4 @@
-python-telegram-bot>=21.1.0
-gspread
-google-auth
-flask
+python-telegram-bot>=21,<23
+gspread>=6,<7
+google-auth>=2.30
+tzdata

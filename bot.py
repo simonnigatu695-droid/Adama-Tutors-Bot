@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import logging
 from datetime import datetime
@@ -29,7 +30,8 @@ GOOGLE_JSON = os.environ.get("GOOGLE_JSON")
 
 # Conversation States
 CHOOSING_ROLE = 0
-# Tutor registration states
+
+# Tutor Registration States
 TUTOR_NAME = 1
 TUTOR_PHONE = 2
 TUTOR_SUBJECTS = 3
@@ -38,7 +40,7 @@ TUTOR_LOCATION = 5
 TUTOR_QUALIFICATION = 6
 TUTOR_ID_PHOTO = 7
 
-# Client request states
+# Client Request States
 CLIENT_NAME = 10
 CLIENT_PHONE = 11
 CLIENT_SUBJECT = 12
@@ -47,8 +49,17 @@ CLIENT_LOCATION = 14
 CLIENT_BUDGET = 15
 
 
-def append_to_gsheet(sheet_name: str, row_data: list):
-    """Appends a row to the specified tab in Google Sheets."""
+def parse_budget_number(text: str) -> float:
+    """Extracts the numeric budget from user input (e.g., '3,500 ETB' -> 3500.0)."""
+    if not text:
+        return 0.0
+    clean_text = text.replace(",", "")
+    numbers = re.findall(r'\d+', clean_text)
+    return float(numbers[0]) if numbers else 0.0
+
+
+def append_to_gsheet(sheet_name: str, row_data: list) -> bool:
+    """Appends a row of data to the specified worksheet tab in Google Sheets."""
     if not GOOGLE_JSON:
         logger.error("GOOGLE_JSON environment variable is not set.")
         return False
@@ -62,7 +73,7 @@ def append_to_gsheet(sheet_name: str, row_data: list):
         credentials = Credentials.from_service_account_info(creds_dict, scopes=scopes)
         client = gspread.authorize(credentials)
         
-        # Open your Google Sheet titled 'Horizon Tutors Hub'
+        # Connects to spreadsheet titled 'Horizon Tutors Hub'
         sheet = client.open("Horizon Tutors Hub").worksheet(sheet_name)
         sheet.append_row(row_data)
         return True
@@ -72,7 +83,7 @@ def append_to_gsheet(sheet_name: str, row_data: list):
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Starts the bot conversation and displays the main menu."""
+    """Initializes the conversation and displays role options."""
     reply_keyboard = [["🎓 Register as Tutor", "📖 Request a Tutor"]]
     await update.message.reply_text(
         "Welcome to *Horizon Tutors Hub*! 👋\n\nPlease select an option below:",
@@ -83,7 +94,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def role_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Directs user based on their menu selection."""
+    """Routes user based on menu choice."""
     text = update.message.text
 
     if text == "🎓 Register as Tutor":
@@ -103,7 +114,7 @@ async def role_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return CLIENT_NAME
 
     else:
-        await update.message.reply_text("Please choose one of the options using the buttons below.")
+        await update.message.reply_text("Please select one of the options using the buttons below.")
         return CHOOSING_ROLE
 
 
@@ -149,23 +160,22 @@ async def tutor_qualification(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def tutor_id_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles photo/document upload for ID verification, logs data, and completes registration."""
+    """Processes ID upload (photo or document), forwards to Admin, and logs tutor details."""
     user = update.effective_user
     file_id = None
 
-    # Check if sent as a compressed photo or document image
     if update.message.photo:
         file_id = update.message.photo[-1].file_id
     elif update.message.document:
         file_id = update.message.document.file_id
     else:
-        await update.message.reply_text("Please upload an image file or photo of your ID card to continue.")
+        await update.message.reply_text("Please upload an image file or photo of your ID card to proceed.")
         return TUTOR_ID_PHOTO
 
     context.user_data["tutor_id_photo"] = file_id
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # Forward ID card photo to Admin Chat
+    # Forward ID verification photo to Admin Chat
     if ADMIN_CHAT_ID:
         try:
             caption_text = (
@@ -199,7 +209,7 @@ async def tutor_id_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         "✅ *Registration Submitted Successfully!*\n\n"
-        "Our team will review your ID verification and contact you shortly when matching tutoring jobs become available.",
+        "Our team will review your ID verification and contact you shortly when matching tutoring opportunities arise.",
         parse_mode="Markdown",
     )
     context.user_data.clear()
@@ -234,14 +244,23 @@ async def client_grade(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def client_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["client_location"] = update.message.text
-    await update.message.reply_text("What is your **Monthly Budget / Offered Rate**? (e.g., 3,000 ETB / month):", parse_mode="Markdown")
+    await update.message.reply_text("What is your **Monthly Budget / Offered Rate**? (e.g., 3,500 ETB or 5,000 ETB):", parse_mode="Markdown")
     return CLIENT_BUDGET
 
 
 async def client_budget(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["client_budget"] = update.message.text
+    """Parses budget threshold, applies payment terms, posts channel job broadcast, and updates database."""
+    user_budget_text = update.message.text
+    context.user_data["client_budget"] = user_budget_text
     user = update.effective_user
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # Evaluate budget threshold for policy tier
+    numeric_budget = parse_budget_number(user_budget_text)
+    if numeric_budget > 4000:
+        trial_terms = "Standard 7-day trial applies (Payment due after 1 week)."
+    else:
+        trial_terms = "Standard 1-day trial applies (Payment due immediately post-trial)."
 
     # Append entry to Google Sheets 'Client_Requests' tab
     row_data = [
@@ -254,11 +273,12 @@ async def client_budget(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.get("client_grade", ""),
         context.user_data.get("client_location", ""),
         context.user_data.get("client_budget", ""),
+        trial_terms,
         "Pending Match",
     ]
     append_to_gsheet("Client_Requests", row_data)
 
-    # Post Job Announcement to Telegram Channel
+    # Broadcast job announcement to Telegram channel
     if JOB_CHANNEL_ID:
         try:
             job_post = (
@@ -266,7 +286,8 @@ async def client_budget(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"📚 *Subject:* {context.user_data.get('client_subject')}\n"
                 f"🎓 *Grade:* {context.user_data.get('client_grade')}\n"
                 f"📍 *Location:* {context.user_data.get('client_location')}\n"
-                f"💰 *Budget:* {context.user_data.get('client_budget')}\n\n"
+                f"💰 *Budget:* {context.user_data.get('client_budget')}\n"
+                f"⚖️ *Terms:* {trial_terms}\n\n"
                 f"📩 *To apply, contact us via bot:* @HorizonTutorsHubBot"
             )
             await context.bot.send_message(chat_id=JOB_CHANNEL_ID, text=job_post, parse_mode="Markdown")
@@ -274,8 +295,9 @@ async def client_budget(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"Error posting job to channel: {e}")
 
     await update.message.reply_text(
-        "✅ *Tutor Request Received!*\n\n"
-        "We have received your request and will match you with a qualified tutor shortly.",
+        f"✅ *Tutor Request Received!*\n\n"
+        f"📋 *Applied Policy:* {trial_terms}\n\n"
+        f"We have published your request to our channel and will match you with a qualified tutor shortly.",
         parse_mode="Markdown",
     )
     context.user_data.clear()
@@ -299,7 +321,7 @@ def main():
         entry_points=[CommandHandler("start", start)],
         states={
             CHOOSING_ROLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, role_chosen)],
-            # Tutor registration flow
+            # Tutor registration handlers
             TUTOR_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, tutor_name)],
             TUTOR_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, tutor_phone)],
             TUTOR_SUBJECTS: [MessageHandler(filters.TEXT & ~filters.COMMAND, tutor_subjects)],
@@ -307,7 +329,7 @@ def main():
             TUTOR_LOCATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, tutor_location)],
             TUTOR_QUALIFICATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, tutor_qualification)],
             TUTOR_ID_PHOTO: [MessageHandler(filters.PHOTO | filters.Document.ALL, tutor_id_photo)],
-            # Client request flow
+            # Client request handlers
             CLIENT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, client_name)],
             CLIENT_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, client_phone)],
             CLIENT_SUBJECT: [MessageHandler(filters.TEXT & ~filters.COMMAND, client_subject)],
@@ -320,7 +342,7 @@ def main():
 
     app.add_handler(conv_handler)
 
-    print("Bot is starting...")
+    print("Bot starting polling...")
     app.run_polling()
 
 

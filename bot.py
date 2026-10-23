@@ -52,7 +52,7 @@ def get_google_sheet(sheet_name="Adama Tutors Database"):
             client = gspread.authorize(creds)
             return client.open(sheet_name)
     except Exception as e:
-        logger.error(f"Google Sheets connection error: {e}")
+        logger.error(f"GSpread Auth Error: {e}")
     return None
 
 def get_next_job_code():
@@ -248,8 +248,6 @@ async def client_budget_rec(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data.get("client_gender_pref"),
                 context.user_data.get("client_duration"),
                 budget_raw,
-                budget_raw,
-                "Standard 50%",
                 "Pending",
                 "Open",
                 ""

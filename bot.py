@@ -33,34 +33,58 @@ def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
-# Google Sheets Setup
+# Google Sheets Setup with Ultra-Transparent Debugging Logs
 def get_gspread_client():
     try:
-        cred_path = "/etc/secrets/credentials.json" if os.path.exists("/etc/secrets/credentials.json") else "credentials.json"
+        possible_paths = [
+            "/etc/secrets/credentials.json",
+            "credentials.json",
+            os.path.join(os.getcwd(), "credentials.json")
+        ]
+        cred_path = None
+        for path in possible_paths:
+            if os.path.exists(path):
+                cred_path = path
+                break
+        
+        if not cred_path:
+            logger.error("❌ GSPREAD ERROR: credentials.json file could not be found anywhere!")
+            return None
+
+        logger.info(f"✅ Found credentials at: {cred_path}")
         gc = gspread.service_account(filename=cred_path)
-        return gc.open("Adama Tutors Database")
+        sheet = gc.open("Adama Tutors Database")
+        logger.info("✅ Successfully opened Google Sheet: Adama Tutors Database")
+        return sheet
     except Exception as e:
-        logger.error(f"Google Sheets connection error: {e}")
+        logger.error(f"❌ GSPREAD CONNECTION EXCEPTION: {str(e)}")
         return None
 
-# Database Helper Functions for All Tabs
 def db_add_tutor(data):
+    logger.info("Attempting to write tutor data to Google Sheets...")
     sheet = get_gspread_client()
     if sheet:
         try:
             ws = sheet.worksheet("Tutors")
             ws.append_row(data)
+            logger.info("🎉 SUCCESS: Tutor row successfully appended to 'Tutors' tab!")
         except Exception as e:
-            logger.error(f"Error appending to Tutors: {e}")
+            logger.error(f"❌ FAILED to append to 'Tutors' tab: {str(e)}")
+    else:
+        logger.error("❌ FAILED to write tutor: Spreadsheet object is None.")
 
 def db_add_client_request(data):
+    logger.info("Attempting to write client request data to Google Sheets...")
     sheet = get_gspread_client()
     if sheet:
         try:
             ws = sheet.worksheet("Client_Requests")
             ws.append_row(data)
+            logger.info("🎉 SUCCESS: Request row successfully appended to 'Client_Requests' tab!")
         except Exception as e:
-            logger.error(f"Error appending to Client_Requests: {e}")
+            logger.error(f"❌ FAILED to append to 'Client_Requests' tab: {str(e)}")
+    else:
+        logger.error("❌ FAILED to write request: Spreadsheet object is None.")
 
 # Conversation States
 (

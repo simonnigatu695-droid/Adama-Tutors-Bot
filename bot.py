@@ -71,7 +71,7 @@ def db_add_client_request(data):
 
 # --- Core Handlers & Commands Setup ---
 
-async def set_bot_commands(application: Application):
+async def post_init(application: Application):
     commands = [
         BotCommand("start", "Start or restart the bot / ቦቱን ያስጀምሩ"),
         BotCommand("cancel", "Cancel current operation / ሂደቱን ይሰርዙ"),
@@ -375,10 +375,7 @@ def main():
     t.daemon = True
     t.start()
 
-    application = Application.builder().token(token).build()
-
-    # Register bot commands
-    application.job_queue.run_once(lambda ctx: application.create_task(set_bot_commands(application)), 0)
+    application = Application.builder().token(token).post_init(post_init).build()
 
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],

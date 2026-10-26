@@ -5,7 +5,7 @@ import random
 from flask import Flask
 from threading import Thread
 import gspread
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -22,7 +22,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Flask App for Render Keep-Alive
+# Flask Keep-Alive Server for Render & Better Stack
 app = Flask('')
 
 @app.route('/')
@@ -43,14 +43,40 @@ def get_gspread_client():
         logger.error(f"Google Sheets connection error: {e}")
         return None
 
+# Database Helper Functions for All Tabs
+def db_add_tutor(data):
+    sheet = get_gspread_client()
+    if sheet:
+        try:
+            ws = sheet.worksheet("Tutors")
+            ws.append_row(data)
+        except Exception as e:
+            logger.error(f"Error appending to Tutors: {e}")
+
+def db_add_client_request(data):
+    sheet = get_gspread_client()
+    if sheet:
+        try:
+            ws = sheet.worksheet("Client_Requests")
+            ws.append_row(data)
+        except Exception as e:
+            logger.error(f"Error appending to Client_Requests: {e}")
+
 # Conversation States
 (
     LANG, MENU, 
-    TUTOR_NAME, TUTOR_PHONE, TUTOR_SUBJECT, TUTOR_CITY,
+    TUTOR_NAME, TUTOR_PHONE, TUTOR_SUBJECT, TUTOR_CITY, TUTOR_ID,
     REQ_NAME, REQ_PHONE, REQ_SUBJECT, REQ_GRADE, REQ_CITY
-) = range(11)
+) = range(12)
 
-# --- Core Handlers ---
+# --- Core Handlers & Commands Setup ---
+
+async def set_bot_commands(application: Application):
+    commands = [
+        BotCommand("start", "Start or restart the bot / ቦቱን ያስጀምሩ"),
+        BotCommand("cancel", "Cancel current operation / ሂደቱን ይሰርዙ"),
+    ]
+    await application.bot.set_my_commands(commands)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
@@ -63,7 +89,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     text = (
         "🌟 **Welcome to Horizon Tutors Hub** 🌟\n"
-        "Connecting qualified tutors with students.\n\n"
+        "Connecting qualified tutors with students in Adama and Bishoftu.\n\n"
         "Please choose your preferred language:"
     )
     
@@ -88,6 +114,7 @@ async def language_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("📚 Request a Tutor", callback_data="req_tutor")],
             [InlineKeyboardButton("ℹ️ About Us", callback_data="about")],
             [InlineKeyboardButton("📞 Contact Support", callback_data="support")],
+            [InlineKeyboardButton("❌ Cancel / Exit", callback_data="cancel_action")],
         ]
     else:
         text = "እንኳን ደህና መጡ! ዛሬ ምን ማድረግ ይፈልጋሉ?"
@@ -96,6 +123,7 @@ async def language_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("📚 መምህር ማግኘት እፈልጋለሁ", callback_data="req_tutor")],
             [InlineKeyboardButton("ℹ️ ስለ እኛ", callback_data="about")],
             [InlineKeyboardButton("📞 የዕርዳታ ማዕከል", callback_data="support")],
+            [InlineKeyboardButton("❌ ሰርዝ / ውጣ", callback_data="cancel_action")],
         ]
     
     await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
@@ -107,21 +135,45 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = context.user_data.get("lang", "en")
 
     if query.data == "about":
-        text = "Horizon Tutors Hub connects top-tier tutors with eager students in Adama and Bishoftu." if lang == "en" else "ሆራይዘን የቱተርስ ሃብ በአዳማ እና በቢሾፍቱ ጥራት ያላቸው መምህራንን ከተማሪዎች ጋር ያገናኛል።"
+        text = (
+            "ℹ️ **About Horizon Tutors Hub**\n"
+            "We are a premier tutoring agency bridging the gap between eager students and "
+            "qualified, verified professional tutors across Adama and Bishoftu. "
+            "Our mission is to foster academic excellence and reliable educational support."
+            if lang == "en" else
+            "ℹ️ **ስለ ሆራይዘን የቱተርስ ሃብ**\n"
+            "እኛ በአዳማ እና በቢሾፍቱ ከተሞች ጥራት ያላቸውን እና ብቁ መምህራንን ከተማሪዎች ጋር የምናገናኝ "
+            "ታማኝ የትምህርት ድርጅት ነን። ዓላማችን አስተማማኝ የትምህርት ድጋፍ መስጠት ነው።"
+        )
         kb = [[InlineKeyboardButton("🔙 Back / ተመለስ", callback_data="back_home")]]
-        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb))
+        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
         return MENU
+        
     elif query.data == "support":
-        text = "Contact support at @HorizonSupport" if lang == "en" else "ለእርዳታ በ @HorizonSupport ያግኙን።"
+        text = (
+            "📞 **Customer Support & Assistance**\n"
+            "For urgent inquiries, reach out to our team:\n\n"
+            "👤 Telegram: @simon_1919\n"
+            "📱 Phone: +251 90 088 2373"
+            if lang == "en" else
+            "📞 **የዕርዳታ ማዕከል (Customer Support)**\n"
+            "ለማንኛውም ጥያቄ ከዚህ በታች ባሉት አድራሻዎች ያግኙን:\n\n"
+            "👤 ቴሌግራም: @simon_1919\n"
+            "📱 ስልክ ቁጥር: +251 90 088 2373"
+        )
         kb = [[InlineKeyboardButton("🔙 Back / ተመለስ", callback_data="back_home")]]
-        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb))
+        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
         return MENU
+        
+    elif query.data == "cancel_action":
+        return await cancel_callback(update, context)
+        
     elif query.data == "back_home":
         return await start(update, context)
     
     return MENU
 
-# --- Tutor Registration Flow (Writes to 'Tutors' tab) ---
+# --- Tutor Registration Flow ('Tutors' Tab) ---
 
 async def reg_tutor_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -129,7 +181,8 @@ async def reg_tutor_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = context.user_data.get("lang", "en")
 
     text = "Please enter your full name:" if lang == "en" else "እባክዎ ሙሉ ስምዎን ያስገቡ:"
-    await query.message.edit_text(text)
+    kb = [[InlineKeyboardButton("❌ Cancel / ሰርዝ", callback_data="cancel_action")]]
+    await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb))
     return TUTOR_NAME
 
 async def tutor_name_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -155,6 +208,7 @@ async def tutor_subject_received(update: Update, context: ContextTypes.DEFAULT_T
     kb = [
         [InlineKeyboardButton("Adama / አዳማ", callback_data="city_adama")],
         [InlineKeyboardButton("Bishoftu / ቢሾፍቱ", callback_data="city_bishoftu")],
+        [InlineKeyboardButton("❌ Cancel / ሰርዝ", callback_data="cancel_action")],
     ]
     text = "Select your city:" if lang == "en" else "ከተማዎን ይምረጡ:"
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(kb))
@@ -166,35 +220,57 @@ async def tutor_city_received(update: Update, context: ContextTypes.DEFAULT_TYPE
     lang = context.user_data.get("lang", "en")
     
     city = "Adama" if query.data == "city_adama" else "Bishoftu"
-    
-    sheet = get_gspread_client()
-    if sheet:
-        try:
-            worksheet = sheet.worksheet("Tutors")
-            worksheet.append_row([
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                str(query.from_user.id),
-                query.from_user.username or "",
-                context.user_data.get("tutor_name"),
-                context.user_data.get("tutor_phone"),
-                context.user_data.get("tutor_subject"),
-                city
-            ])
-        except Exception as e:
-            logger.error(f"Failed to write to Tutors sheet: {e}")
+    context.user_data["tutor_city"] = city
 
     text = (
-        "✅ **Registration Successful!**\nWe have received your details and will contact you soon."
+        "📷 **ID Verification Required**\nPlease upload a clear photo of the **front of your National ID**:"
         if lang == "en" else
-        "✅ **ምዝገባዎ ተሳክቷል!**\nመረጃዎ ደርሶናል፤ በቅርቡ እናነጋግርዎታለን።"
+        "📷 **መታወቂያ ማረጋገጫ**\nእባክዎ የመታወቂያዎን (የብሔራዊ መታወቂያ) ፊት ለፊት ግልጽ ፎቶ ይላኩ:"
+    )
+    
+    await query.message.edit_text(text, parse_mode="Markdown")
+    return TUTOR_ID
+
+async def tutor_id_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = context.user_data.get("lang", "en")
+    
+    if not update.message.photo:
+        text = "Please upload an image file of your ID." if lang == "en" else "እባክዎ የመታወቂያዎን ፎቶ ምስል ይላኩ።"
+        await update.message.reply_text(text)
+        return TUTOR_ID
+
+    photo_file = await update.message.photo[-1].get_file()
+    id_file_id = photo_file.file_id
+
+    # Append row to 'Tutors' tab
+    db_add_tutor([
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S"), # Timestamp
+        str(update.effective_user.id),                # Telegram ID
+        update.effective_user.username or "",         # Username
+        context.user_data.get("tutor_name"),          # Name
+        context.user_data.get("tutor_phone"),         # Phone
+        "",                                           # Gender
+        context.user_data.get("tutor_subject"),       # Subjects
+        "",                                           # Grades
+        context.user_data.get("tutor_city"),          # Location
+        "",                                           # Qualification
+        "Pending",                                    # ID Verification Status
+        "Active",                                     # Status
+        id_file_id                                    # ID File Reference
+    ])
+
+    text = (
+        "✅ **Registration & ID Submitted Successfully!**\nWe have received your details and ID. We will review and contact you soon."
+        if lang == "en" else
+        "✅ **ምዝገባዎ እና መታወቂያዎ በተሳካ ሁኔታ ተልኳል!**\nመረጃዎ እና መታወቂያዎ ደርሶናል፤ አጣርተን በቅርቡ እናነጋግርዎታለን።"
     )
     
     kb = [[InlineKeyboardButton("🔙 Main Menu / ዋና ምናሌ", callback_data="back_home")]]
-    await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
     return MENU
 
 
-# --- Student Request Flow (Writes to 'Client_Requests' tab) ---
+# --- Student Request Flow ('Client_Requests' Tab) ---
 
 async def req_tutor_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -249,26 +325,19 @@ async def req_city_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     city = "Adama" if query.data == "reqcity_adama" else "Bishoftu"
     job_code = f"HRZ-{random.randint(1000, 9999)}"
 
-    # Save to Client_Requests worksheet matching your exact columns:
-    # Timestamp, Job Code, Telegram ID, Username, Client Name, Phone, Subject, Grade, City...
-    sheet = get_gspread_client()
-    if sheet:
-        try:
-            worksheet = sheet.worksheet("Client_Requests")
-            worksheet.append_row([
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"), # Timestamp
-                job_code,                                    # Job Code
-                str(query.from_user.id),                     # Telegram ID
-                query.from_user.username or "",              # Username
-                context.user_data.get("req_name"),           # Client Name
-                context.user_data.get("req_phone"),          # Phone
-                context.user_data.get("req_subject"),        # Subject
-                context.user_data.get("req_grade"),          # Grade
-                city,                                        # City
-                "", "", "", "", "", "", ""                   # Empty placeholders for remaining columns (Place, Budget, etc.)
-            ])
-        except Exception as e:
-            logger.error(f"Failed to write to Client_Requests sheet: {e}")
+    # Append row to 'Client_Requests' tab
+    db_add_client_request([
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S"), # Timestamp
+        job_code,                                    # Job Code
+        str(query.from_user.id),                     # Telegram ID
+        query.from_user.username or "",              # Username
+        context.user_data.get("req_name"),           # Client Name
+        context.user_data.get("req_phone"),          # Phone
+        context.user_data.get("req_subject"),        # Subject
+        context.user_data.get("req_grade"),          # Grade
+        city,                                        # City
+        "", "", "", "", "", "", "Pending", "Open", "" # Place, Prefs, Budget, Status, etc.
+    ])
 
     text = (
         f"✅ **Request Submitted Successfully!**\nYour Job Code is `{job_code}`. We will match you with a qualified tutor soon."
@@ -280,13 +349,21 @@ async def req_city_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
     return MENU
 
+# --- Cancel Handlers ---
 
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = "Operation cancelled. Type /start to begin again."
     if update.message:
         await update.message.reply_text(text)
     return ConversationHandler.END
 
+async def cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    text = "Operation cancelled. Type /start to begin again."
+    kb = [[InlineKeyboardButton("🔄 Restart / ጀምር", callback_data="back_home")]]
+    await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb))
+    return ConversationHandler.END
 
 def main():
     token = os.environ.get("TELEGRAM_TOKEN")
@@ -300,19 +377,29 @@ def main():
 
     application = Application.builder().token(token).build()
 
+    # Register bot commands
+    application.job_queue.run_once(lambda ctx: application.create_task(set_bot_commands(application)), 0)
+
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
             LANG: [CallbackQueryHandler(language_handler, pattern="^lang_")],
             MENU: [
-                CallbackQueryHandler(menu_callback, pattern="^(about|support|back_home)$"),
+                CallbackQueryHandler(menu_callback, pattern="^(about|support|back_home|cancel_action)$"),
                 CallbackQueryHandler(reg_tutor_start, pattern="^reg_tutor$"),
                 CallbackQueryHandler(req_tutor_start, pattern="^req_tutor$"),
             ],
-            TUTOR_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, tutor_name_received)],
+            TUTOR_NAME: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, tutor_name_received),
+                CallbackQueryHandler(cancel_callback, pattern="^cancel_action$")
+            ],
             TUTOR_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, tutor_phone_received)],
             TUTOR_SUBJECT: [MessageHandler(filters.TEXT & ~filters.COMMAND, tutor_subject_received)],
-            TUTOR_CITY: [CallbackQueryHandler(tutor_city_received, pattern="^city_")],
+            TUTOR_CITY: [
+                CallbackQueryHandler(tutor_city_received, pattern="^city_"),
+                CallbackQueryHandler(cancel_callback, pattern="^cancel_action$")
+            ],
+            TUTOR_ID: [MessageHandler(filters.PHOTO & ~filters.COMMAND, tutor_id_received)],
             
             REQ_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, req_name_received)],
             REQ_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, req_phone_received)],
@@ -320,7 +407,7 @@ def main():
             REQ_GRADE: [MessageHandler(filters.TEXT & ~filters.COMMAND, req_grade_received)],
             REQ_CITY: [CallbackQueryHandler(req_city_received, pattern="^reqcity_")],
         },
-        fallbacks=[CommandHandler("cancel", cancel)],
+        fallbacks=[CommandHandler("cancel", cancel_command)],
     )
 
     application.add_handler(conv_handler)

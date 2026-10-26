@@ -2,6 +2,7 @@ import os
 import logging
 from datetime import datetime
 import random
+import json
 from flask import Flask
 from threading import Thread
 import gspread
@@ -33,9 +34,19 @@ def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
-# Google Sheets Setup with Ultra-Transparent Debugging Logs
+# Google Sheets Setup supporting multiple environment variable keys & fallback paths
 def get_gspread_client():
     try:
+        # Check both possible environment variable key names
+        env_creds = os.environ.get("GOOGLE_CREDENTIALS_JSON") or os.environ.get("credentials.json")
+        if env_creds:
+            logger.info("✅ Loading credentials from environment variable")
+            creds_dict = json.loads(env_creds)
+            gc = gspread.service_account_from_dict(creds_dict)
+            sheet = gc.open("Adama Tutors Database")
+            logger.info("✅ Successfully opened Google Sheet: Adama Tutors Database")
+            return sheet
+
         possible_paths = [
             "/etc/secrets/credentials.json",
             "credentials.json",
@@ -48,7 +59,7 @@ def get_gspread_client():
                 break
         
         if not cred_path:
-            logger.error("❌ GSPREAD ERROR: credentials.json file could not be found anywhere!")
+            logger.error("❌ GSPREAD ERROR: credentials.json could not be found anywhere!")
             return None
 
         logger.info(f"✅ Found credentials at: {cred_path}")
@@ -429,6 +440,7 @@ def main():
             REQ_CITY: [CallbackQueryHandler(req_city_received, pattern="^reqcity_")],
         },
         fallbacks=[CommandHandler("cancel", cancel_command)],
+        per_message=False
     )
 
     application.add_handler(conv_handler)

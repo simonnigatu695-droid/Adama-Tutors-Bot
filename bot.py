@@ -207,16 +207,22 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     return MENU
 
-# --- Additional Command Implementations ---
+# --- Admin Command Implementations ---
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📖 Use /start to open the main menu or /cancel to abort any ongoing operation.")
-
-async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📢 Broadcast feature ready.")
-
-async def catchup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📋 Checking recent pending applications...")
+    help_text = (
+        "📖 **Horizon Tutors Hub - Help Guide**\n\n"
+        "👤 **User Commands:**\n"
+        "• /start - Open main menu & choose language\n"
+        "• /cancel - Abort current operation\n\n"
+        "🛠️ **Admin Commands:**\n"
+        "• /stats - View live agency database counts\n"
+        "• /search [Keyword] - Search approved tutors (e.g. `/search Mathematics`)\n"
+        "• /catchup - View active pending items in memory\n"
+        "• /broadcast [Job Code] - Broadcast a job vacancy to the channel\n"
+        "• /testblur - Test sharpness score of a replied ID photo"
+    )
+    await update.message.reply_text(help_text, parse_mode="Markdown")
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sheet = get_gspread_client()
@@ -224,15 +230,145 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             tutors_count = len(sheet.worksheet("Tutors").get_all_values()) - 1
             requests_count = len(sheet.worksheet("Client_Requests").get_all_values()) - 1
-            await update.message.reply_text(f"📊 **Live Agency Stats**\n\nTutors: {max(0, tutors_count)}\nRequests: {max(0, requests_count)}", parse_mode="Markdown")
+            await update.message.reply_text(
+                f"📊 **Live Agency Stats (Horizon Tutors Hub)**\n\n"
+                f"👨‍🏫 Approved Tutors: `{max(0, tutors_count)}`\n"
+                f"📚 Total Student Requests: `{max(0, requests_count)}`\n"
+                f"📍 Active Cities: Adama & Bishoftu",
+                parse_mode="Markdown"
+            )
         except Exception as e:
-            await update.message.reply_text(f"Error fetching stats: {e}")
+            await update.message.reply_text(f"❌ Error fetching stats from Google Sheets: {e}")
+    else:
+        await update.message.reply_text("❌ Database connection error.")
 
 async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔍 Search feature ready.")
+    if not context.args:
+        await update.message.reply_text("🔍 Usage: `/search [keyword]` (e.g., `/search Mathematics` or `/search Adama`)", parse_mode="Markdown")
+        return
+    
+    query_keyword = " ".join(context.args).lower()
+    sheet = get_gspread_client()
+    if not sheet:
+        await update.message.reply_text("❌ Database connection error.")
+        return
+
+    try:
+        ws = sheet.worksheet("Tutors")
+        rows = ws.get_all_values()
+        if len(rows) <= 1:
+            await update.message.reply_text("📭 No tutors registered in database yet.")
+            return
+
+        matches = []
+        # Columns: Timestamp(0), UserID(1), ..., Name(3), Phone(4), ..., Subject(6), Grade(7), Location(8), Budget(9), Status(10)...
+        for row in rows[1:]:
+            row_str = " ".join(row).lower()
+            if query_keyword in row_str:
+                name = row[3] if len(row) > 3 else "Unknown"
+                phone = row[4] if len(row) > 4 else "N/A"
+                subject = row[6] if len(row) > 6 else "N/A"
+                grade = row[7] if len(row) > 7 else "N/A"
+                loc = row[8] if len(row) > 8 else "N/A"
+                matches.append(f"👤 **{name}**\n📞 `{phone}`\n📚 {subject} ({grade})\n📍 {loc}\n")
+
+        if matches:
+            response_text = f"🔍 **Search Results for '{query_keyword}':**\n\n" + "\n".join(matches[:10])
+            await update.message.reply_text(response_text, parse_mode="Markdown")
+        else:
+            await update.message.reply_text(f"🔍 No matching tutors found for '{query_keyword}'.")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Search error: {e}")
+
+async def catchup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    pending_items = [k for k in context.bot_data.keys() if k.startswith("pending_")]
+    if not pending_items:
+        await update.message.reply_text("📋 No pending tutor registrations or student requests currently in memory.")
+        return
+
+    text = f"📋 **Pending Applications in Memory ({len(pending_items)}):**\n"
+    for item in pending_items:
+        text += f"• `{item}`\n"
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("📢 Usage: `/broadcast [Job Code]` (e.g., `/broadcast HRZ-4829`)", parse_mode="Markdown")
+        return
+
+    job_code_target = context.args[0].replace("#", "")
+    job_channel_id = os.environ.get("JOB_CHANNEL_ID")
+    
+    if not job_channel_id:
+        await update.message.reply_text("❌ `JOB_CHANNEL_ID` environment variable is not configured.")
+        return
+
+    sheet = get_gspread_client()
+    if not sheet:
+        await update.message.reply_text("❌ Database connection error.")
+        return
+
+    try:
+        ws = sheet.worksheet("Client_Requests")
+        rows = ws.get_all_values()
+        found_row = None
+        for row in rows[1:]:
+            if len(row) > 1 and row[1] == job_code_target:
+                found_row = row
+                break
+
+        if not found_row:
+            await update.message.reply_text(f"❌ Job Code `#{job_code_target}` not found in Google Sheets.", parse_mode="Markdown")
+            return
+
+        # Columns: Timestamp(0), JobCode(1), UserID(2), ..., Name(4), Phone(5), Subject(6), Grade(7), City(8), SpecificLoc(9), Budget(10)...
+        grade_str = found_row[7] if len(found_row) > 7 else "N/A"
+        city_str = found_row[8] if len(found_row) > 8 else "N/A"
+        loc_str = found_row[9] if len(found_row) > 9 else "N/A"
+        subject_str = found_row[6] if len(found_row) > 6 else "N/A"
+        budget_str = found_row[10] if len(found_row) > 10 else "Negotiable"
+
+        channel_msg = (
+            f"🟢 **OPEN VACANCY**\n\n"
+            f"🏫 **Grade:** {grade_str}\n"
+            f"🏙️ **City:** {city_str} ({loc_str})\n"
+            f"📚 **Subject:** {subject_str}\n"
+            f"💰 **Budget:** {budget_str}\n"
+            f"💬 **Job code:** #{job_code_target}\n\n"
+            f"💡 *Policy: 1-day trial session. Agency commission (50%) applies after successful trial.*\n"
+            f"_We need highly committed, punctual and talented tutor._"
+        )
+        bot_username = context.bot.username
+        channel_kb = [[InlineKeyboardButton("Apply Now", url=f"https://t.me/{bot_username}")]]
+        
+        await context.bot.send_message(
+            chat_id=job_channel_id,
+            text=channel_msg,
+            reply_markup=InlineKeyboardMarkup(channel_kb),
+            parse_mode="Markdown"
+        )
+        await update.message.reply_text(f"✅ Successfully broadcasted job `#{job_code_target}` to the channel!", parse_mode="Markdown")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Broadcast error: {e}")
 
 async def testblur_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📷 Send or reply to an ID photo to test its sharpness score.")
+    if not update.message.reply_to_message or not update.message.reply_to_message.photo:
+        await update.message.reply_text("📷 Please **reply to an ID photo** with `/testblur` to test its sharpness score.", parse_mode="Markdown")
+        return
+
+    photo_file = await update.message.reply_to_message.photo[-1].get_file()
+    file_bytes = await photo_file.download_as_bytearray()
+    nparr = np.frombuffer(file_bytes, np.uint8)
+    img = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE)
+    sharpness = round(cv2.Laplacian(img, cv2.CV_64F).var(), 2) if img is not None else 0.0
+    blur_status = "🟢 Clear (Pass)" if sharpness > 100 else "⚠️ Blurry / Low Quality (Fail)"
+
+    await update.message.reply_text(
+        f"📐 **ID Blur Test Result:**\n\n"
+        f"• Sharpness Score: `{sharpness}`\n"
+        f"• Status: {blur_status}",
+        parse_mode="Markdown"
+    )
 
 # --- Tutor Registration Flow ---
 
@@ -293,6 +429,7 @@ async def tutor_subject_received(update: Update, context: ContextTypes.DEFAULT_T
 
     text = "Select Grade Category:" if lang == "en" else "የክፍል ምድብ ይምረጡ:"
     kb = [
+        [InlineKeyboardButton("🧸 Kindergarten (KG) / መዋዕለ ህፃናት", callback_data="tcat_kg")],
         [InlineKeyboardButton("🎒 Primary / አንደኛ ደረጃ", callback_data="tcat_primary")],
         [InlineKeyboardButton("🏫 Secondary / ሁለተኛ ደረጃ", callback_data="tcat_secondary")],
         [InlineKeyboardButton("❌ Cancel / ሰርዝ", callback_data="cancel_action")],
@@ -303,11 +440,24 @@ async def tutor_subject_received(update: Update, context: ContextTypes.DEFAULT_T
 async def tutor_grade_cat_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    category = "Primary" if query.data == "tcat_primary" else "Secondary"
+    
+    if query.data == "tcat_kg":
+        category = "Kindergarten (KG)"
+    elif query.data == "tcat_primary":
+        category = "Primary"
+    else:
+        category = "Secondary"
+        
     context.user_data["tutor_grade_cat"] = category
     lang = context.user_data.get("lang", "en")
 
-    if category == "Primary":
+    if category == "Kindergarten (KG)":
+        kb = [
+            [InlineKeyboardButton("KG 1", callback_data="tgrade_kg1"), InlineKeyboardButton("KG 2", callback_data="tgrade_kg2"), InlineKeyboardButton("KG 3", callback_data="tgrade_kg3")],
+            [InlineKeyboardButton("⭐ All KG Levels", callback_data="tgrade_all_kg")],
+            [InlineKeyboardButton("❌ Cancel / ሰርዝ", callback_data="cancel_action")]
+        ]
+    elif category == "Primary":
         kb = [
             [InlineKeyboardButton("Grade 1", callback_data="tgrade_1"), InlineKeyboardButton("Grade 2", callback_data="tgrade_2")],
             [InlineKeyboardButton("Grade 3", callback_data="tgrade_3"), InlineKeyboardButton("Grade 4", callback_data="tgrade_4")],
@@ -331,6 +481,7 @@ async def tutor_grade_specific_received(update: Update, context: ContextTypes.DE
     query = update.callback_query
     await query.answer()
     mapping = {
+        "tgrade_kg1": "KG 1", "tgrade_kg2": "KG 2", "tgrade_kg3": "KG 3", "tgrade_all_kg": "All KG Levels",
         "tgrade_1": "Grade 1", "tgrade_2": "Grade 2", "tgrade_3": "Grade 3", "tgrade_4": "Grade 4",
         "tgrade_5": "Grade 5", "tgrade_6": "Grade 6", "tgrade_7": "Grade 7", "tgrade_8": "Grade 8",
         "tgrade_all_primary": "All Primary (1 - 8)",
@@ -365,15 +516,14 @@ async def tutor_specific_loc_received(update: Update, context: ContextTypes.DEFA
     lang = context.user_data.get("lang", "en")
 
     text = (
-        "💰 **Select or enter your expected payment rate / budget:**\n"
-        "You can choose an option below or type a specific amount (e.g., 4,000 ETB):"
+        "💰 **Expected Payment / Budget Option:**\n"
+        "Click **Negotiable 🤝** or type your specific expected amount (e.g., `4,000 ETB`):"
         if lang == "en" else
-        "💰 **የሚጠብቁትን ክፍያ መጠን / ወርሃዊ በጀት ይምረጡ ወይም ይፃፉ:**\n"
-        "ከታች ካሉት አማራጮች ይምረጡ ወይም የተወሰነ ቁጥር ያስገቡ (ምሳሌ፦ 4,000 ብር):"
+        "💰 **የሚጠብቁት የክፍያ መጠን / በጀት:**\n"
+        "**ለመደራደር የሚቻል 🤝** የሚለውን ይጫኑ ወይም የተወሰነ ቁጥር በጥፈት ያስገቡ (ምሳሌ፦ `4,000 ብር`):"
     )
     kb = [
         [InlineKeyboardButton("🤝 Negotiable / ለመደራደር የሚቻል", callback_data="tbudget_negotiable")],
-        [InlineKeyboardButton("💵 Standard Agency Rate / መደበኛ የድርጅቱ ተመን", callback_data="tbudget_standard")],
         [InlineKeyboardButton("❌ Cancel / ሰርዝ", callback_data="cancel_action")]
     ]
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
@@ -382,11 +532,7 @@ async def tutor_specific_loc_received(update: Update, context: ContextTypes.DEFA
 async def tutor_budget_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    mapping = {
-        "tbudget_negotiable": "Negotiable 🤝",
-        "tbudget_standard": "Standard Agency Rate 💵"
-    }
-    context.user_data["tutor_budget"] = mapping.get(query.data, "Negotiable")
+    context.user_data["tutor_budget"] = "Negotiable 🤝"
     return await proceed_to_tutor_id(query.message, context)
 
 async def tutor_budget_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -525,6 +671,7 @@ async def req_subject_received(update: Update, context: ContextTypes.DEFAULT_TYP
 
     text = "Select Grade Category:" if lang == "en" else "የክፍል ምድብ ይምረጡ:"
     kb = [
+        [InlineKeyboardButton("🧸 Kindergarten (KG) / መዋዕለ ህፃናት", callback_data="rcat_kg")],
         [InlineKeyboardButton("🎒 Primary / አንደኛ ደረጃ", callback_data="rcat_primary")],
         [InlineKeyboardButton("🏫 Secondary / ሁለተኛ ደረጃ", callback_data="rcat_secondary")],
     ]
@@ -534,11 +681,23 @@ async def req_subject_received(update: Update, context: ContextTypes.DEFAULT_TYP
 async def req_grade_cat_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    category = "Primary" if query.data == "rcat_primary" else "Secondary"
+    
+    if query.data == "rcat_kg":
+        category = "Kindergarten (KG)"
+    elif query.data == "rcat_primary":
+        category = "Primary"
+    else:
+        category = "Secondary"
+        
     context.user_data["req_grade_cat"] = category
     lang = context.user_data.get("lang", "en")
 
-    if category == "Primary":
+    if category == "Kindergarten (KG)":
+        kb = [
+            [InlineKeyboardButton("KG 1", callback_data="rgrade_kg1"), InlineKeyboardButton("KG 2", callback_data="rgrade_kg2"), InlineKeyboardButton("KG 3", callback_data="rgrade_kg3")],
+            [InlineKeyboardButton("⭐ All KG Levels", callback_data="rgrade_all_kg")]
+        ]
+    elif category == "Primary":
         kb = [
             [InlineKeyboardButton("Grade 1", callback_data="rgrade_1"), InlineKeyboardButton("Grade 2", callback_data="rgrade_2")],
             [InlineKeyboardButton("Grade 3", callback_data="rgrade_3"), InlineKeyboardButton("Grade 4", callback_data="rgrade_4")],
@@ -560,6 +719,7 @@ async def req_grade_specific_received(update: Update, context: ContextTypes.DEFA
     query = update.callback_query
     await query.answer()
     mapping = {
+        "rgrade_kg1": "KG 1", "rgrade_kg2": "KG 2", "rgrade_kg3": "KG 3", "rgrade_all_kg": "All KG Levels",
         "rgrade_1": "Grade 1", "rgrade_2": "Grade 2", "rgrade_3": "Grade 3", "rgrade_4": "Grade 4",
         "rgrade_5": "Grade 5", "rgrade_6": "Grade 6", "rgrade_7": "Grade 7", "rgrade_8": "Grade 8",
         "rgrade_all_primary": "All Primary (1 - 8)",
@@ -593,15 +753,14 @@ async def req_specific_loc_received(update: Update, context: ContextTypes.DEFAUL
     lang = context.user_data.get("lang", "en")
 
     text = (
-        "💰 **Select or enter your offered budget / payment rate:**\n"
-        "You can choose an option below or type a specific amount (e.g., 3,500 ETB):"
+        "💰 **Offered Budget Option:**\n"
+        "Click **Negotiable 🤝** or type your specific budget (e.g., `3,500 ETB`):"
         if lang == "en" else
-        "💰 **ለመክፈል ያሰቡትን ወርሃዊ በጀት / ክፍያ መጠን ይምረጡ ወይም ይፃፉ:**\n"
-        "ከታች ካሉት አማራጮች ይምረጡ ወይም የተወሰነ ቁጥር ያስገቡ (ምሳሌ፦ 3,500 ብር):"
+        "💰 **ለመክፈል ያሰቡት የበጀት መጠን:**\n"
+        "**ለመደራደር የሚቻል 🤝** የሚለውን ይጫኑ ወይም የተወሰነ ቁጥር በጥፈት ያስገቡ (ምሳሌ፦ `3,500 ብር`):"
     )
     kb = [
         [InlineKeyboardButton("🤝 Negotiable / ለመደራደር የሚቻል", callback_data="rbudget_negotiable")],
-        [InlineKeyboardButton("💵 Standard Agency Rate / መደበኛ የድርጅቱ ተመን", callback_data="rbudget_standard")],
         [InlineKeyboardButton("❌ Cancel / ሰርዝ", callback_data="cancel_action")]
     ]
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
@@ -610,11 +769,7 @@ async def req_specific_loc_received(update: Update, context: ContextTypes.DEFAUL
 async def req_budget_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    mapping = {
-        "rbudget_negotiable": "Negotiable 🤝",
-        "rbudget_standard": "Standard Agency Rate 💵"
-    }
-    context.user_data["req_budget"] = mapping.get(query.data, "Negotiable")
+    context.user_data["req_budget"] = "Negotiable 🤝"
     return await finalize_client_request(query.message, context)
 
 async def req_budget_text(update: Update, context: ContextTypes.DEFAULT_TYPE):

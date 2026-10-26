@@ -287,31 +287,43 @@ async def tutor_grade_cat_received(update: Update, context: ContextTypes.DEFAULT
 
     if category == "Primary":
         kb = [
-            [InlineKeyboardButton("Grade 1 - 4", callback_data="tgrade_1_4"), InlineKeyboardButton("Grade 5 - 8", callback_data="tgrade_5_8")],
-            [InlineKeyboardButton("All Primary (1 - 8)", callback_data="tgrade_all_primary")],
+            [InlineKeyboardButton("Grade 1", callback_data="tgrade_1"), InlineKeyboardButton("Grade 2", callback_data="tgrade_2")],
+            [InlineKeyboardButton("Grade 3", callback_data="tgrade_3"), InlineKeyboardButton("Grade 4", callback_data="tgrade_4")],
+            [InlineKeyboardButton("Grade 5", callback_data="tgrade_5"), InlineKeyboardButton("Grade 6", callback_data="tgrade_6")],
+            [InlineKeyboardButton("Grade 7", callback_data="tgrade_7"), InlineKeyboardButton("Grade 8", callback_data="tgrade_8")],
+            [InlineKeyboardButton("⭐ All Primary (1 - 8)", callback_data="tgrade_all_primary")],
             [InlineKeyboardButton("❌ Cancel / ሰርዝ", callback_data="cancel_action")]
         ]
     else:
         kb = [
-            [InlineKeyboardButton("Grade 9 & 10", callback_data="tgrade_9_10"), InlineKeyboardButton("Grade 11 & 12", callback_data="tgrade_11_12")],
-            [InlineKeyboardButton("All Secondary (9 - 12)", callback_data="tgrade_all_secondary")],
+            [InlineKeyboardButton("Grade 9", callback_data="tgrade_9"), InlineKeyboardButton("Grade 10", callback_data="tgrade_10")],
+            [InlineKeyboardButton("Grade 11", callback_data="tgrade_11"), InlineKeyboardButton("Grade 12", callback_data="tgrade_12")],
+            [InlineKeyboardButton("⭐ All Secondary (9 - 12)", callback_data="tgrade_all_secondary")],
             [InlineKeyboardButton("❌ Cancel / ሰርዝ", callback_data="cancel_action")]
         ]
-    await query.message.edit_text(f"Select specific grades under **{category}**:", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+    await query.message.edit_text(f"Select exact grade under **{category}**:", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
     return TUTOR_GRADE_SPECIFIC
 
 async def tutor_grade_specific_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     mapping = {
-        "tgrade_1_4": "Grade 1 - 4",
-        "tgrade_5_8": "Grade 5 - 8",
-        "tgrade_all_primary": "Primary (1 - 8)",
-        "tgrade_9_10": "Grade 9 & 10",
-        "tgrade_11_12": "Grade 11 & 12",
-        "tgrade_all_secondary": "Secondary (9 - 12)"
+        "tgrade_1": "Grade 1",
+        "tgrade_2": "Grade 2",
+        "tgrade_3": "Grade 3",
+        "tgrade_4": "Grade 4",
+        "tgrade_5": "Grade 5",
+        "tgrade_6": "Grade 6",
+        "tgrade_7": "Grade 7",
+        "tgrade_8": "Grade 8",
+        "tgrade_all_primary": "All Primary (1 - 8)",
+        "tgrade_9": "Grade 9",
+        "tgrade_10": "Grade 10",
+        "tgrade_11": "Grade 11",
+        "tgrade_12": "Grade 12",
+        "tgrade_all_secondary": "All Secondary (9 - 12)"
     }
-    context.user_data["tutor_grade_specific"] = mapping.get(query.data, "Custom Grades")
+    context.user_data["tutor_grade_specific"] = mapping.get(query.data, "Specific Grade")
 
     kb = [
         [InlineKeyboardButton("Adama / አዳማ", callback_data="city_adama")],
@@ -363,7 +375,7 @@ async def tutor_id_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📞 Phone: {context.user_data.get('tutor_phone')}\n"
             f"📚 Subject: {context.user_data.get('tutor_subject')}\n"
             f"🏫 Category: {context.user_data.get('tutor_grade_cat')}\n"
-            f"🎒 Grades: {context.user_data.get('tutor_grade_specific')}\n"
+            f"🎒 Exact Grade: {context.user_data.get('tutor_grade_specific')}\n"
             f"🏙️ City: {context.user_data.get('tutor_city')}\n"
             f"📍 Location: {context.user_data.get('tutor_specific_loc')}\n"
             f"📐 ID Sharpness Score: `{sharpness}` ({blur_status})"
@@ -442,29 +454,41 @@ async def req_grade_cat_received(update: Update, context: ContextTypes.DEFAULT_T
 
     if category == "Primary":
         kb = [
-            [InlineKeyboardButton("Grade 1 - 4", callback_data="rgrade_1_4"), InlineKeyboardButton("Grade 5 - 8", callback_data="rgrade_5_8")],
-            [InlineKeyboardButton("All Primary (1 - 8)", callback_data="rgrade_all_primary")]
+            [InlineKeyboardButton("Grade 1", callback_data="rgrade_1"), InlineKeyboardButton("Grade 2", callback_data="rgrade_2")],
+            [InlineKeyboardButton("Grade 3", callback_data="rgrade_3"), InlineKeyboardButton("Grade 4", callback_data="rgrade_4")],
+            [InlineKeyboardButton("Grade 5", callback_data="rgrade_5"), InlineKeyboardButton("Grade 6", callback_data="rgrade_6")],
+            [InlineKeyboardButton("Grade 7", callback_data="rgrade_7"), InlineKeyboardButton("Grade 8", callback_data="rgrade_8")],
+            [InlineKeyboardButton("⭐ All Primary (1 - 8)", callback_data="rgrade_all_primary")]
         ]
     else:
         kb = [
-            [InlineKeyboardButton("Grade 9 & 10", callback_data="rgrade_9_10"), InlineKeyboardButton("Grade 11 & 12", callback_data="rgrade_11_12")],
-            [InlineKeyboardButton("All Secondary (9 - 12)", callback_data="rgrade_all_secondary")]
+            [InlineKeyboardButton("Grade 9", callback_data="rgrade_9"), InlineKeyboardButton("Grade 10", callback_data="rgrade_10")],
+            [InlineKeyboardButton("Grade 11", callback_data="rgrade_11"), InlineKeyboardButton("Grade 12", callback_data="rgrade_12")],
+            [InlineKeyboardButton("⭐ All Secondary (9 - 12)", callback_data="rgrade_all_secondary")]
         ]
-    await query.message.edit_text(f"Select specific grades under **{category}**:", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+    await query.message.edit_text(f"Select exact grade under **{category}**:", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
     return REQ_GRADE_SPECIFIC
 
 async def req_grade_specific_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     mapping = {
-        "rgrade_1_4": "Grade 1 - 4",
-        "rgrade_5_8": "Grade 5 - 8",
-        "rgrade_all_primary": "Primary (1 - 8)",
-        "rgrade_9_10": "Grade 9 & 10",
-        "rgrade_11_12": "Grade 11 & 12",
-        "rgrade_all_secondary": "Secondary (9 - 12)"
+        "rgrade_1": "Grade 1",
+        "rgrade_2": "Grade 2",
+        "rgrade_3": "Grade 3",
+        "rgrade_4": "Grade 4",
+        "rgrade_5": "Grade 5",
+        "rgrade_6": "Grade 6",
+        "rgrade_7": "Grade 7",
+        "rgrade_8": "Grade 8",
+        "rgrade_all_primary": "All Primary (1 - 8)",
+        "rgrade_9": "Grade 9",
+        "rgrade_10": "Grade 10",
+        "rgrade_11": "Grade 11",
+        "rgrade_12": "Grade 12",
+        "rgrade_all_secondary": "All Secondary (9 - 12)"
     }
-    context.user_data["req_grade_specific"] = mapping.get(query.data, "General Grades")
+    context.user_data["req_grade_specific"] = mapping.get(query.data, "Specific Grade")
 
     kb = [
         [InlineKeyboardButton("Adama / አዳማ", callback_data="reqcity_adama")],
@@ -498,7 +522,7 @@ async def req_specific_loc_received(update: Update, context: ContextTypes.DEFAUL
             f"📞 Phone: {context.user_data.get('req_phone')}\n"
             f"📚 Subject: {context.user_data.get('req_subject')}\n"
             f"🏫 Category: {context.user_data.get('req_grade_cat')}\n"
-            f"🎒 Grades: {context.user_data.get('req_grade_specific')}\n"
+            f"🎒 Exact Grade: {context.user_data.get('req_grade_specific')}\n"
             f"🏙️ City: {context.user_data.get('req_city')}\n"
             f"📍 Location: {context.user_data.get('req_specific_loc')}"
         )
@@ -536,7 +560,7 @@ async def admin_approval_callback(update: Update, context: ContextTypes.DEFAULT_
                 tutor_data.get('tutor_phone'),
                 "",
                 tutor_data.get('tutor_subject'),
-                f"{tutor_data.get('tutor_grade_cat')} ({tutor_data.get('tutor_grade_specific')})",
+                f"{tutor_data.get('tutor_grade_cat')} - {tutor_data.get('tutor_grade_specific')}",
                 full_location,
                 "",
                 "Approved",

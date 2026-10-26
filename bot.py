@@ -96,8 +96,8 @@ def db_add_client_request(data):
 (
     LANG, MENU, 
     TUTOR_NAME, TUTOR_PHONE, TUTOR_SUBJECT, TUTOR_GRADE_CAT, TUTOR_GRADE_SPECIFIC, TUTOR_CITY, TUTOR_SPECIFIC_LOC, TUTOR_BUDGET, TUTOR_ID,
-    REQ_NAME, REQ_PHONE, REQ_SUBJECT, REQ_GRADE_CAT, REQ_GRADE_SPECIFIC, REQ_CITY, REQ_SPECIFIC_LOC
-) = range(18)
+    REQ_NAME, REQ_PHONE, REQ_SUBJECT, REQ_GRADE_CAT, REQ_GRADE_SPECIFIC, REQ_CITY, REQ_SPECIFIC_LOC, REQ_BUDGET
+) = range(19)
 
 # --- Core Handlers & Commands Setup ---
 
@@ -364,22 +364,47 @@ async def tutor_specific_loc_received(update: Update, context: ContextTypes.DEFA
     context.user_data["tutor_specific_loc"] = update.message.text
     lang = context.user_data.get("lang", "en")
 
-    text = "💰 Please enter your expected payment rate / budget (e.g., 4,000 ETB per month):" if lang == "en" else "💰 የሚጠብቁትን ክፍያ መጠን / ወርሃዊ በጀት ያስገቡ (ምሳሌ፦ 4,000 ብር):"
-    kb = [[InlineKeyboardButton("❌ Cancel / ሰርዝ", callback_data="cancel_action")]]
-    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(kb))
+    text = (
+        "💰 **Select or enter your expected payment rate / budget:**\n"
+        "You can choose an option below or type a specific amount (e.g., 4,000 ETB):"
+        if lang == "en" else
+        "💰 **የሚጠብቁትን ክፍያ መጠን / ወርሃዊ በጀት ይምረጡ ወይም ይፃፉ:**\n"
+        "ከታች ካሉት አማራጮች ይምረጡ ወይም የተወሰነ ቁጥር ያስገቡ (ምሳሌ፦ 4,000 ብር):"
+    )
+    kb = [
+        [InlineKeyboardButton("🤝 Negotiable / ለመደራደር የሚቻል", callback_data="tbudget_negotiable")],
+        [InlineKeyboardButton("💵 Standard Agency Rate / መደበኛ የድርጅቱ ተመን", callback_data="tbudget_standard")],
+        [InlineKeyboardButton("❌ Cancel / ሰርዝ", callback_data="cancel_action")]
+    ]
+    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
     return TUTOR_BUDGET
 
-async def tutor_budget_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["tutor_budget"] = update.message.text
-    lang = context.user_data.get("lang", "en")
+async def tutor_budget_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    mapping = {
+        "tbudget_negotiable": "Negotiable 🤝",
+        "tbudget_standard": "Standard Agency Rate 💵"
+    }
+    context.user_data["tutor_budget"] = mapping.get(query.data, "Negotiable")
+    return await proceed_to_tutor_id(query.message, context)
 
+async def tutor_budget_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["tutor_budget"] = update.message.text
+    return await proceed_to_tutor_id(update.message, context)
+
+async def proceed_to_tutor_id(message_obj, context):
+    lang = context.user_data.get("lang", "en")
     text = (
         "📷 **Almost done!** To help us maintain a safe and trusted community for students and parents, "
         "please upload a clear photo of the **front of your National ID**:"
         if lang == "en" else
         "📷 **ሊጠናቀቅ ነው።!** ተማሪዎችን እና ወላጆችን ለመጠበቅ እባክዎ የመታወቂያዎን ፊት ለፊት ግልጽ ፎቶ ይላኩ:"
     )
-    await update.message.reply_text(text, parse_mode="Markdown")
+    if hasattr(message_obj, "edit_text"):
+        await message_obj.edit_text(text, parse_mode="Markdown")
+    else:
+        await message_obj.reply_text(text, parse_mode="Markdown")
     return TUTOR_ID
 
 async def tutor_id_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -565,11 +590,43 @@ async def req_city_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def req_specific_loc_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["req_specific_loc"] = update.message.text
+    lang = context.user_data.get("lang", "en")
+
+    text = (
+        "💰 **Select or enter your offered budget / payment rate:**\n"
+        "You can choose an option below or type a specific amount (e.g., 3,500 ETB):"
+        if lang == "en" else
+        "💰 **ለመክፈል ያሰቡትን ወርሃዊ በጀት / ክፍያ መጠን ይምረጡ ወይም ይፃፉ:**\n"
+        "ከታች ካሉት አማራጮች ይምረጡ ወይም የተወሰነ ቁጥር ያስገቡ (ምሳሌ፦ 3,500 ብር):"
+    )
+    kb = [
+        [InlineKeyboardButton("🤝 Negotiable / ለመደራደር የሚቻል", callback_data="rbudget_negotiable")],
+        [InlineKeyboardButton("💵 Standard Agency Rate / መደበኛ የድርጅቱ ተመን", callback_data="rbudget_standard")],
+        [InlineKeyboardButton("❌ Cancel / ሰርዝ", callback_data="cancel_action")]
+    ]
+    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+    return REQ_BUDGET
+
+async def req_budget_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    mapping = {
+        "rbudget_negotiable": "Negotiable 🤝",
+        "rbudget_standard": "Standard Agency Rate 💵"
+    }
+    context.user_data["req_budget"] = mapping.get(query.data, "Negotiable")
+    return await finalize_client_request(query.message, context)
+
+async def req_budget_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["req_budget"] = update.message.text
+    return await finalize_client_request(update.message, context)
+
+async def finalize_client_request(message_obj, context):
     job_code = f"HRZ-{random.randint(1000, 9999)}"
     context.user_data["job_code"] = job_code
     lang = context.user_data.get("lang", "en")
 
-    user_id = update.effective_user.id
+    user_id = message_obj.chat.id if hasattr(message_obj, "chat") else message_obj.chat_id
     context.bot_data[f"pending_req_{user_id}"] = context.user_data.copy()
 
     admin_chat_id = os.environ.get("ADMIN_CHAT_ID")
@@ -583,7 +640,8 @@ async def req_specific_loc_received(update: Update, context: ContextTypes.DEFAUL
             f"🏫 Category: {context.user_data.get('req_grade_cat')}\n"
             f"🎒 Exact Grade: {context.user_data.get('req_grade_specific')}\n"
             f"🏙️ City: {context.user_data.get('req_city')}\n"
-            f"📍 Location: {context.user_data.get('req_specific_loc')}"
+            f"📍 Location: {context.user_data.get('req_specific_loc')}\n"
+            f"💰 Budget: {context.user_data.get('req_budget')}"
         )
         kb = [
             [
@@ -599,7 +657,11 @@ async def req_specific_loc_received(update: Update, context: ContextTypes.DEFAUL
         f"✅ **ጥያቄዎ ለግምገማ ተልኳል!**\nየሥራ ኮድዎ (Job Code): `{job_code}` ነው። በአስተዳዳሪዎች ሲጸድቅ በቻናሉ ይለቀቃል።"
     )
     kb = [[InlineKeyboardButton("🔙 Main Menu / ዋና ምናሌ", callback_data="back_home")]]
-    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+    
+    if hasattr(message_obj, "edit_text"):
+        await message_obj.edit_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+    else:
+        await message_obj.reply_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
     return MENU
 
 
@@ -660,7 +722,8 @@ async def admin_approval_callback(update: Update, context: ContextTypes.DEFAULT_
                 full_grade_str,
                 req_data.get('req_city'),
                 req_data.get('req_specific_loc'),
-                "", "", "", "", "", "Approved", "Open", ""
+                req_data.get('req_budget'),
+                "", "", "", "", "Approved", "Open", ""
             ])
 
             job_channel_id = os.environ.get("JOB_CHANNEL_ID")
@@ -671,6 +734,7 @@ async def admin_approval_callback(update: Update, context: ContextTypes.DEFAULT_
                     f"🏙️ **City:** {req_data.get('req_city')}\n"
                     f"📍 **Place:** {req_data.get('req_specific_loc')}\n"
                     f"📚 **Subject:** {req_data.get('req_subject')}\n"
+                    f"💰 **Budget:** {req_data.get('req_budget')}\n"
                     f"💬 **Job code:** #{job_code}\n\n"
                     f"💡 *Policy: 1-day trial session. Agency commission (50%) applies after successful trial.*\n"
                     f"_We need highly committed, punctual and talented tutor._"
@@ -736,7 +800,11 @@ def main():
             TUTOR_GRADE_SPECIFIC: [CallbackQueryHandler(tutor_grade_specific_received, pattern="^tgrade_"), CallbackQueryHandler(cancel_callback, pattern="^cancel_action$")],
             TUTOR_CITY: [CallbackQueryHandler(tutor_city_received, pattern="^city_"), CallbackQueryHandler(cancel_callback, pattern="^cancel_action$")],
             TUTOR_SPECIFIC_LOC: [MessageHandler(filters.TEXT & ~filters.COMMAND, tutor_specific_loc_received), CallbackQueryHandler(cancel_callback, pattern="^cancel_action$")],
-            TUTOR_BUDGET: [MessageHandler(filters.TEXT & ~filters.COMMAND, tutor_budget_received), CallbackQueryHandler(cancel_callback, pattern="^cancel_action$")],
+            TUTOR_BUDGET: [
+                CallbackQueryHandler(tutor_budget_callback, pattern="^tbudget_"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, tutor_budget_text),
+                CallbackQueryHandler(cancel_callback, pattern="^cancel_action$")
+            ],
             TUTOR_ID: [MessageHandler(filters.PHOTO & ~filters.COMMAND, tutor_id_received), CallbackQueryHandler(cancel_callback, pattern="^cancel_action$")],
             
             REQ_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, req_name_received), CallbackQueryHandler(cancel_callback, pattern="^cancel_action$")],
@@ -746,6 +814,11 @@ def main():
             REQ_GRADE_SPECIFIC: [CallbackQueryHandler(req_grade_specific_received, pattern="^rgrade_"), CallbackQueryHandler(cancel_callback, pattern="^cancel_action$")],
             REQ_CITY: [CallbackQueryHandler(req_city_received, pattern="^reqcity_"), CallbackQueryHandler(cancel_callback, pattern="^cancel_action$")],
             REQ_SPECIFIC_LOC: [MessageHandler(filters.TEXT & ~filters.COMMAND, req_specific_loc_received), CallbackQueryHandler(cancel_callback, pattern="^cancel_action$")],
+            REQ_BUDGET: [
+                CallbackQueryHandler(req_budget_callback, pattern="^rbudget_"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, req_budget_text),
+                CallbackQueryHandler(cancel_callback, pattern="^cancel_action$")
+            ],
         },
         fallbacks=[CommandHandler("cancel", cancel_command)],
         per_message=False

@@ -1,4 +1,7 @@
-python-telegram-bot>=21.1.0
-gspread
-google-auth
-flask
+python-telegram-bot==22.8
+Flask==3.1.3
+gspread==6.2.1
+google-auth==2.62.0
+google-auth-oauthlib==1.5.0
+opencv-python-headless
+numpy

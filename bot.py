@@ -92,12 +92,12 @@ def db_add_client_request(data):
         except Exception as e:
             logger.error(f"❌ FAILED to append to 'Client_Requests' tab: {str(e)}")
 
-# Conversation States
+# Conversation States (TUTOR_BUDGET removed from tutor flow, kept REQ_BUDGET for clients)
 (
     LANG, MENU, 
-    TUTOR_NAME, TUTOR_PHONE, TUTOR_SUBJECT, TUTOR_GRADE_CAT, TUTOR_GRADE_SPECIFIC, TUTOR_CITY, TUTOR_SPECIFIC_LOC, TUTOR_BUDGET, TUTOR_ID,
+    TUTOR_NAME, TUTOR_PHONE, TUTOR_SUBJECT, TUTOR_GRADE_CAT, TUTOR_GRADE_SPECIFIC, TUTOR_CITY, TUTOR_SPECIFIC_LOC, TUTOR_ID,
     REQ_NAME, REQ_PHONE, REQ_SUBJECT, REQ_GRADE_CAT, REQ_GRADE_SPECIFIC, REQ_CITY, REQ_SPECIFIC_LOC, REQ_BUDGET
-) = range(19)
+) = range(18)
 
 # --- Core Handlers & Commands Setup ---
 
@@ -261,7 +261,6 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         matches = []
-        # Columns: Timestamp(0), UserID(1), ..., Name(3), Phone(4), ..., Subject(6), Grade(7), Location(8), Budget(9), Status(10)...
         for row in rows[1:]:
             row_str = " ".join(row).lower()
             if query_keyword in row_str:
@@ -321,7 +320,6 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"❌ Job Code `#{job_code_target}` not found in Google Sheets.", parse_mode="Markdown")
             return
 
-        # Columns: Timestamp(0), JobCode(1), UserID(2), ..., Name(4), Phone(5), Subject(6), Grade(7), City(8), SpecificLoc(9), Budget(10)...
         grade_str = found_row[7] if len(found_row) > 7 else "N/A"
         city_str = found_row[8] if len(found_row) > 8 else "N/A"
         loc_str = found_row[9] if len(found_row) > 9 else "N/A"
@@ -513,30 +511,7 @@ async def tutor_city_received(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def tutor_specific_loc_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["tutor_specific_loc"] = update.message.text
-    lang = context.user_data.get("lang", "en")
-
-    text = (
-        "💰 **Expected Payment / Budget Option:**\n"
-        "Click **Negotiable 🤝** or type your specific expected amount (e.g., `4,000 ETB`):"
-        if lang == "en" else
-        "💰 **የሚጠብቁት የክፍያ መጠን / በጀት:**\n"
-        "**ለመደራደር የሚቻል 🤝** የሚለውን ይጫኑ ወይም የተወሰነ ቁጥር በጥፈት ያስገቡ (ምሳሌ፦ `4,000 ብር`):"
-    )
-    kb = [
-        [InlineKeyboardButton("🤝 Negotiable / ለመደራደር የሚቻል", callback_data="tbudget_negotiable")],
-        [InlineKeyboardButton("❌ Cancel / ሰርዝ", callback_data="cancel_action")]
-    ]
-    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
-    return TUTOR_BUDGET
-
-async def tutor_budget_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    context.user_data["tutor_budget"] = "Negotiable 🤝"
-    return await proceed_to_tutor_id(query.message, context)
-
-async def tutor_budget_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["tutor_budget"] = update.message.text
+    context.user_data["tutor_budget"] = "N/A (Negotiable)"
     return await proceed_to_tutor_id(update.message, context)
 
 async def proceed_to_tutor_id(message_obj, context):
@@ -547,10 +522,7 @@ async def proceed_to_tutor_id(message_obj, context):
         if lang == "en" else
         "📷 **ሊጠናቀቅ ነው።!** ተማሪዎችን እና ወላጆችን ለመጠበቅ እባክዎ የመታወቂያዎን ፊት ለፊት ግልጽ ፎቶ ይላኩ:"
     )
-    if hasattr(message_obj, "edit_text"):
-        await message_obj.edit_text(text, parse_mode="Markdown")
-    else:
-        await message_obj.reply_text(text, parse_mode="Markdown")
+    await message_obj.reply_text(text, parse_mode="Markdown")
     return TUTOR_ID
 
 async def tutor_id_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -583,7 +555,6 @@ async def tutor_id_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🎒 Exact Grade: {context.user_data.get('tutor_grade_specific')}\n"
             f"🏙️ City: {context.user_data.get('tutor_city')}\n"
             f"📍 Location: {context.user_data.get('tutor_specific_loc')}\n"
-            f"💰 Budget: {context.user_data.get('tutor_budget')}\n"
             f"📐 ID Sharpness Score: `{sharpness}` ({blur_status})"
         )
         
@@ -842,7 +813,7 @@ async def admin_approval_callback(update: Update, context: ContextTypes.DEFAULT_
                 tutor_data.get('tutor_subject'),
                 f"{tutor_data.get('tutor_grade_cat')} - {tutor_data.get('tutor_grade_specific')}",
                 full_location,
-                tutor_data.get('tutor_budget'),
+                tutor_data.get('tutor_budget', 'N/A'),
                 "Approved",
                 "Active",
                 tutor_data.get('tutor_id_file_id')
@@ -955,11 +926,6 @@ def main():
             TUTOR_GRADE_SPECIFIC: [CallbackQueryHandler(tutor_grade_specific_received, pattern="^tgrade_"), CallbackQueryHandler(cancel_callback, pattern="^cancel_action$")],
             TUTOR_CITY: [CallbackQueryHandler(tutor_city_received, pattern="^city_"), CallbackQueryHandler(cancel_callback, pattern="^cancel_action$")],
             TUTOR_SPECIFIC_LOC: [MessageHandler(filters.TEXT & ~filters.COMMAND, tutor_specific_loc_received), CallbackQueryHandler(cancel_callback, pattern="^cancel_action$")],
-            TUTOR_BUDGET: [
-                CallbackQueryHandler(tutor_budget_callback, pattern="^tbudget_"),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, tutor_budget_text),
-                CallbackQueryHandler(cancel_callback, pattern="^cancel_action$")
-            ],
             TUTOR_ID: [MessageHandler(filters.PHOTO & ~filters.COMMAND, tutor_id_received), CallbackQueryHandler(cancel_callback, pattern="^cancel_action$")],
             
             REQ_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, req_name_received), CallbackQueryHandler(cancel_callback, pattern="^cancel_action$")],

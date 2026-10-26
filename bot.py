@@ -92,7 +92,7 @@ def db_add_client_request(data):
         except Exception as e:
             logger.error(f"❌ FAILED to append to 'Client_Requests' tab: {str(e)}")
 
-# Conversation States (TUTOR_BUDGET removed from tutor flow, kept REQ_BUDGET for clients)
+# Conversation States
 (
     LANG, MENU, 
     TUTOR_NAME, TUTOR_PHONE, TUTOR_SUBJECT, TUTOR_GRADE_CAT, TUTOR_GRADE_SPECIFIC, TUTOR_CITY, TUTOR_SPECIFIC_LOC, TUTOR_ID,
@@ -115,6 +115,18 @@ async def post_init(application: Application):
     await application.bot.set_my_commands(commands)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Check for deep-linking (e.g. /start apply_HRZ-1234)
+    if context.args:
+        arg = context.args[0]
+        if arg.startswith("apply_"):
+            job_code = arg.replace("apply_", "")
+            context.user_data["target_job"] = job_code
+            await update.message.reply_text(
+                f"🎯 **Applying for Job #{job_code}**\n"
+                f"Welcome! To apply for this vacancy, please register as a tutor or contact our admin with your Job Code.",
+                parse_mode="Markdown"
+            )
+
     keyboard = [
         [
             InlineKeyboardButton("English 🇬🇧", callback_data="lang_en"),
@@ -337,7 +349,8 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"_We need highly committed, punctual and talented tutor._"
         )
         bot_username = context.bot.username
-        channel_kb = [[InlineKeyboardButton("Apply Now", url=f"https://t.me/{bot_username}")]]
+        # Deep-linking the Apply Now button to pass the exact job code
+        channel_kb = [[InlineKeyboardButton("Apply Now", url=f"https://t.me/{bot_username}?start=apply_{job_code_target}")]]
         
         await context.bot.send_message(
             chat_id=job_channel_id,
@@ -345,7 +358,7 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup(channel_kb),
             parse_mode="Markdown"
         )
-        await update.message.reply_text(f"✅ Successfully broadcasted job `#{job_code_target}` to the channel!", parse_mode="Markdown")
+        await update.message.reply_text(f"✅ Successfully broadcasted job `#{job_code_target}` to the channel with deep-link!", parse_mode="Markdown")
     except Exception as e:
         await update.message.reply_text(f"❌ Broadcast error: {e}")
 
@@ -511,7 +524,7 @@ async def tutor_city_received(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def tutor_specific_loc_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["tutor_specific_loc"] = update.message.text
-    context.user_data["tutor_budget"] = "N/A (Negotiable)"
+    context.user_data["tutor_budget"] = "N/A"
     return await proceed_to_tutor_id(update.message, context)
 
 async def proceed_to_tutor_id(message_obj, context):
@@ -576,11 +589,20 @@ async def tutor_id_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     text = (
-        "✅ **Registration & ID Submitted for Review!**\nOur admin team is reviewing your details and ID. You will be notified soon."
+        "✅ **Registration & ID Submitted for Review!**\n"
+        "Our admin team is reviewing your details. You will be notified soon.\n\n"
+        "📢 **Stay Updated:** Don't forget to join our official channel for daily job postings!"
         if lang == "en" else
-        "✅ **ምዝገባዎ እና መታወቂያዎ ለግምገማ ተልኳል!**\nአስተዳዳሪዎቻችን አጣርተው በቅርቡ ያነጋግሩዎታል።"
+        "✅ **ምዝገባዎ እና መታወቂያዎ ለግምገማ ተልኳል!**\n"
+        "አስተዳዳሪዎቻችን አጣርተው በቅርቡ ያነጋግሩዎታል።\n\n"
+        "📢 **ማሳሰቢያ:** አዳዲስ የሥራ ዕድሎችን ለማግኘት የቴሌግራም ቻናላችንን ይቀላቀሉ!"
     )
-    kb = [[InlineKeyboardButton("🔙 Main Menu / ዋና ምናሌ", callback_data="back_home")]]
+    
+    channel_link = os.environ.get("CHANNEL_INVITE_LINK", "https://t.me/HorizonTutorsHub")
+    kb = [
+        [InlineKeyboardButton("📢 Join Official Channel / ቻናላችንን ይቀላቀሉ", url=channel_link)],
+        [InlineKeyboardButton("🔙 Main Menu / ዋና ምናሌ", callback_data="back_home")]
+    ]
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
     return MENU
 
@@ -778,11 +800,19 @@ async def finalize_client_request(message_obj, context):
         await context.bot.send_message(chat_id=admin_chat_id, text=review_text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
 
     text = (
-        f"✅ **Request Submitted for Review!**\nYour Job Code is `{job_code}`. Once reviewed by our team, it will be posted."
+        f"✅ **Request Submitted for Review!**\n"
+        f"Your Job Code is `{job_code}`. Once reviewed by our team, it will be posted.\n\n"
+        f"📢 Join our official channel to view your posted vacancy!"
         if lang == "en" else
-        f"✅ **ጥያቄዎ ለግምገማ ተልኳል!**\nየሥራ ኮድዎ (Job Code): `{job_code}` ነው። በአስተዳዳሪዎች ሲጸድቅ በቻናሉ ይለቀቃል።"
+        f"✅ **ጥያቄዎ ለግምገማ ተልኳል!**\n"
+        f"የሥራ ኮድዎ (Job Code): `{job_code}` ነው። በአስተዳዳሪዎች ሲጸድቅ ይለቀቃል።"
     )
-    kb = [[InlineKeyboardButton("🔙 Main Menu / ዋና ምናሌ", callback_data="back_home")]]
+    
+    channel_link = os.environ.get("CHANNEL_INVITE_LINK", "https://t.me/HorizonTutorsHub")
+    kb = [
+        [InlineKeyboardButton("📢 Join Official Channel / ቻናላችንን ይቀላቀሉ", url=channel_link)],
+        [InlineKeyboardButton("🔙 Main Menu / ዋና ምናሌ", callback_data="back_home")]
+    ]
     
     if hasattr(message_obj, "edit_text"):
         await message_obj.edit_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
@@ -866,7 +896,8 @@ async def admin_approval_callback(update: Update, context: ContextTypes.DEFAULT_
                     f"_We need highly committed, punctual and talented tutor._"
                 )
                 bot_username = context.bot.username
-                channel_kb = [[InlineKeyboardButton("Apply Now", url=f"https://t.me/{bot_username}")]]
+                # Deep-linked button for direct application
+                channel_kb = [[InlineKeyboardButton("Apply Now", url=f"https://t.me/{bot_username}?start=apply_{job_code}")]]
                 await context.bot.send_message(
                     chat_id=job_channel_id,
                     text=channel_msg,

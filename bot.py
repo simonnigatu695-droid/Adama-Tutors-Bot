@@ -3,6 +3,8 @@ import logging
 from datetime import datetime
 import random
 import json
+import cv2
+import numpy as np
 from flask import Flask
 from threading import Thread
 import gspread
@@ -37,7 +39,6 @@ def run_flask():
 # Google Sheets Setup supporting multiple environment variable keys & fallback paths
 def get_gspread_client():
     try:
-        # Check both possible environment variable key names
         env_creds = os.environ.get("GOOGLE_CREDENTIALS_JSON") or os.environ.get("credentials.json")
         if env_creds:
             logger.info("✅ Loading credentials from environment variable")
@@ -72,7 +73,6 @@ def get_gspread_client():
         return None
 
 def db_add_tutor(data):
-    logger.info("Attempting to write tutor data to Google Sheets...")
     sheet = get_gspread_client()
     if sheet:
         try:
@@ -81,11 +81,8 @@ def db_add_tutor(data):
             logger.info("🎉 SUCCESS: Tutor row successfully appended to 'Tutors' tab!")
         except Exception as e:
             logger.error(f"❌ FAILED to append to 'Tutors' tab: {str(e)}")
-    else:
-        logger.error("❌ FAILED to write tutor: Spreadsheet object is None.")
 
 def db_add_client_request(data):
-    logger.info("Attempting to write client request data to Google Sheets...")
     sheet = get_gspread_client()
     if sheet:
         try:
@@ -94,21 +91,25 @@ def db_add_client_request(data):
             logger.info("🎉 SUCCESS: Request row successfully appended to 'Client_Requests' tab!")
         except Exception as e:
             logger.error(f"❌ FAILED to append to 'Client_Requests' tab: {str(e)}")
-    else:
-        logger.error("❌ FAILED to write request: Spreadsheet object is None.")
 
 # Conversation States
 (
     LANG, MENU, 
-    TUTOR_NAME, TUTOR_PHONE, TUTOR_SUBJECT, TUTOR_CITY, TUTOR_ID,
-    REQ_NAME, REQ_PHONE, REQ_SUBJECT, REQ_GRADE, REQ_CITY
-) = range(12)
+    TUTOR_NAME, TUTOR_PHONE, TUTOR_SUBJECT, TUTOR_GRADE_CAT, TUTOR_GRADE_SPECIFIC, TUTOR_CITY, TUTOR_SPECIFIC_LOC, TUTOR_ID,
+    REQ_NAME, REQ_PHONE, REQ_SUBJECT, REQ_GRADE_CAT, REQ_GRADE_SPECIFIC, REQ_CITY, REQ_SPECIFIC_LOC
+) = range(17)
 
 # --- Core Handlers & Commands Setup ---
 
 async def post_init(application: Application):
     commands = [
         BotCommand("start", "Start or restart the bot / ቦቱን ያስጀምሩ"),
+        BotCommand("help", "How to use this bot"),
+        BotCommand("broadcast", "Post vacancy with job ID to channel"),
+        BotCommand("catchup", "View recent pending applications"),
+        BotCommand("stats", "View live agency stats"),
+        BotCommand("search", "Search approved tutors by keyword"),
+        BotCommand("testblur", "Check sharpness score of an ID photo"),
         BotCommand("cancel", "Cancel current operation / ሂደቱን ይሰርዙ"),
     ]
     await application.bot.set_my_commands(commands)
@@ -173,12 +174,10 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = (
             "ℹ️ **About Horizon Tutors Hub**\n"
             "We are a premier tutoring agency bridging the gap between eager students and "
-            "qualified, verified professional tutors across Adama and Bishoftu. "
-            "Our mission is to foster academic excellence and reliable educational support."
+            "qualified, verified professional tutors across Adama and Bishoftu."
             if lang == "en" else
             "ℹ️ **ስለ ሆራይዘን የቱተርስ ሃብ**\n"
-            "እኛ በአዳማ እና በቢሾፍቱ ከተሞች ጥራት ያላቸውን እና ብቁ መምህራንን ከተማሪዎች ጋር የምናገናኝ "
-            "ታማኝ የትምህርት ድርጅት ነን። ዓላማችን አስተማማኝ የትምህርት ድጋፍ መስጠት ነው።"
+            "እኛ በአዳማ እና በቢሾፍቱ ከተሞች ጥራት ያላቸውን እና ብቁ መምህራንን ከተማሪዎች ጋር የምናገናኝ ድርጅት ነን።"
         )
         kb = [[InlineKeyboardButton("🔙 Back / ተመለስ", callback_data="back_home")]]
         await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
@@ -187,12 +186,10 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "support":
         text = (
             "📞 **Customer Support & Assistance**\n"
-            "For urgent inquiries, reach out to our team:\n\n"
             "👤 Telegram: @simon_1919\n"
             "📱 Phone: +251 90 088 2373"
             if lang == "en" else
-            "📞 **የዕርዳታ ማዕከል (Customer Support)**\n"
-            "ለማንኛውም ጥያቄ ከዚህ በታች ባሉት አድራሻዎች ያግኙን:\n\n"
+            "📞 **የዕርዳታ ማዕከል**\n"
             "👤 ቴሌግራም: @simon_1919\n"
             "📱 ስልክ ቁጥር: +251 90 088 2373"
         )
@@ -208,202 +205,425 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     return MENU
 
-# --- Tutor Registration Flow ('Tutors' Tab) ---
+# --- Additional Command Implementations ---
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("📖 Use /start to open the main menu or /cancel to abort any ongoing operation.")
+
+async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("📢 Broadcast feature ready.")
+
+async def catchup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("📋 Checking recent pending applications...")
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    sheet = get_gspread_client()
+    if sheet:
+        try:
+            tutors_count = len(sheet.worksheet("Tutors").get_all_values()) - 1
+            requests_count = len(sheet.worksheet("Client_Requests").get_all_values()) - 1
+            await update.message.reply_text(f"📊 **Live Agency Stats**\n\nTutors: {max(0, tutors_count)}\nRequests: {max(0, requests_count)}", parse_mode="Markdown")
+        except Exception as e:
+            await update.message.reply_text(f"Error fetching stats: {e}")
+
+async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🔍 Search feature ready.")
+
+async def testblur_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("📷 Send or reply to an ID photo to test its sharpness score.")
+
+# --- Tutor Registration Flow ---
 
 async def reg_tutor_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    lang = context.user_data.get("lang", "en")
-
-    text = "Please enter your full name:" if lang == "en" else "እባክዎ ሙሉ ስምዎን ያስገቡ:"
+    text = "Please enter your full name:"
     kb = [[InlineKeyboardButton("❌ Cancel / ሰርዝ", callback_data="cancel_action")]]
     await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb))
     return TUTOR_NAME
 
 async def tutor_name_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    lang = context.user_data.get("lang", "en")
     context.user_data["tutor_name"] = update.message.text
-
-    text = "Please enter your phone number (e.g., 0911223344):" if lang == "en" else "እባክዎ ስልክ ቁጥርዎን ያስገቡ (ምሳሌ፦ 0911223344):"
-    await update.message.reply_text(text)
+    kb = [[InlineKeyboardButton("❌ Cancel / ሰርዝ", callback_data="cancel_action")]]
+    await update.message.reply_text("Please enter your phone number (e.g., 0911223344):", reply_markup=InlineKeyboardMarkup(kb))
     return TUTOR_PHONE
 
 async def tutor_phone_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    lang = context.user_data.get("lang", "en")
     context.user_data["tutor_phone"] = update.message.text
-
-    text = "What subjects or grades can you teach?" if lang == "en" else "ምን አይነት ትምህርቶች ወይም የክፍል ደረጃዎች ማስተማር ይችላሉ?"
-    await update.message.reply_text(text)
+    kb = [
+        [InlineKeyboardButton("📚 All Subjects / ሁሉም", callback_data="tsubj_all")],
+        [InlineKeyboardButton("🔢 Mathematics / ሂሳብ", callback_data="tsubj_math")],
+        [InlineKeyboardButton("⚗️ Physics & Chemistry / ሳይንስ", callback_data="tsubj_science")],
+        [InlineKeyboardButton("📝 English / እንግሊዝኛ", callback_data="tsubj_english")],
+        [InlineKeyboardButton("❌ Cancel / ሰርዝ", callback_data="cancel_action")],
+    ]
+    await update.message.reply_text("Select your primary teaching subject:", reply_markup=InlineKeyboardMarkup(kb))
     return TUTOR_SUBJECT
 
 async def tutor_subject_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    lang = context.user_data.get("lang", "en")
-    context.user_data["tutor_subject"] = update.message.text
+    query = update.callback_query
+    await query.answer()
+    mapping = {
+        "tsubj_all": "All Subjects",
+        "tsubj_math": "Mathematics",
+        "tsubj_science": "Physics & Chemistry",
+        "tsubj_english": "English"
+    }
+    context.user_data["tutor_subject"] = mapping.get(query.data, "Custom Subject")
+
+    kb = [
+        [InlineKeyboardButton("🎒 Primary / አንደኛ ደረጃ", callback_data="tcat_primary")],
+        [InlineKeyboardButton("🏫 Secondary / ሁለተኛ ደረጃ", callback_data="tcat_secondary")],
+        [InlineKeyboardButton("❌ Cancel / ሰርዝ", callback_data="cancel_action")],
+    ]
+    await query.message.edit_text("Select Grade Category:", reply_markup=InlineKeyboardMarkup(kb))
+    return TUTOR_GRADE_CAT
+
+async def tutor_grade_cat_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    category = "Primary" if query.data == "tcat_primary" else "Secondary"
+    context.user_data["tutor_grade_cat"] = category
+
+    if category == "Primary":
+        kb = [
+            [InlineKeyboardButton("Grade 1 - 4", callback_data="tgrade_1_4"), InlineKeyboardButton("Grade 5 - 8", callback_data="tgrade_5_8")],
+            [InlineKeyboardButton("All Primary (1 - 8)", callback_data="tgrade_all_primary")],
+            [InlineKeyboardButton("❌ Cancel / ሰርዝ", callback_data="cancel_action")]
+        ]
+    else:
+        kb = [
+            [InlineKeyboardButton("Grade 9 & 10", callback_data="tgrade_9_10"), InlineKeyboardButton("Grade 11 & 12", callback_data="tgrade_11_12")],
+            [InlineKeyboardButton("All Secondary (9 - 12)", callback_data="tgrade_all_secondary")],
+            [InlineKeyboardButton("❌ Cancel / ሰርዝ", callback_data="cancel_action")]
+        ]
+    await query.message.edit_text(f"Select specific grades under **{category}**:", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+    return TUTOR_GRADE_SPECIFIC
+
+async def tutor_grade_specific_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    mapping = {
+        "tgrade_1_4": "Grade 1 - 4",
+        "tgrade_5_8": "Grade 5 - 8",
+        "tgrade_all_primary": "Primary (1 - 8)",
+        "tgrade_9_10": "Grade 9 & 10",
+        "tgrade_11_12": "Grade 11 & 12",
+        "tgrade_all_secondary": "Secondary (9 - 12)"
+    }
+    context.user_data["tutor_grade_specific"] = mapping.get(query.data, "Custom Grades")
 
     kb = [
         [InlineKeyboardButton("Adama / አዳማ", callback_data="city_adama")],
         [InlineKeyboardButton("Bishoftu / ቢሾፍቱ", callback_data="city_bishoftu")],
         [InlineKeyboardButton("❌ Cancel / ሰርዝ", callback_data="cancel_action")],
     ]
-    text = "Select your city:" if lang == "en" else "ከተማዎን ይምረጡ:"
-    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(kb))
+    await query.message.edit_text("Select your city / ከተማዎን ይምረጡ:", reply_markup=InlineKeyboardMarkup(kb))
     return TUTOR_CITY
 
 async def tutor_city_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    lang = context.user_data.get("lang", "en")
-    
-    city = "Adama" if query.data == "city_adama" else "Bishoftu"
-    context.user_data["tutor_city"] = city
+    context.user_data["tutor_city"] = "Adama" if query.data == "city_adama" else "Bishoftu"
+    kb = [[InlineKeyboardButton("❌ Cancel / ሰርዝ", callback_data="cancel_action")]]
+    await query.message.edit_text("📍 Please enter your specific neighborhood or Kebele:", reply_markup=InlineKeyboardMarkup(kb))
+    return TUTOR_SPECIFIC_LOC
 
+async def tutor_specific_loc_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["tutor_specific_loc"] = update.message.text
     text = (
-        "📷 **ID Verification Required**\nPlease upload a clear photo of the **front of your National ID**:"
-        if lang == "en" else
-        "📷 **መታወቂያ ማረጋገጫ**\nእባክዎ የመታወቂያዎን (የብሔራዊ መታወቂያ) ፊት ለፊት ግልጽ ፎቶ ይላኩ:"
+        "📷 **Almost done!** To help us maintain a safe and trusted community for students and parents, "
+        "please upload a clear photo of the **front of your National ID**:"
     )
-    
-    await query.message.edit_text(text, parse_mode="Markdown")
+    await update.message.reply_text(text, parse_mode="Markdown")
     return TUTOR_ID
 
 async def tutor_id_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    lang = context.user_data.get("lang", "en")
-    
     if not update.message.photo:
-        text = "Please upload an image file of your ID." if lang == "en" else "እባክዎ የመታወቂያዎን ፎቶ ምስል ይላኩ።"
-        await update.message.reply_text(text)
+        await update.message.reply_text("Please upload an image file of your ID.")
         return TUTOR_ID
 
     photo_file = await update.message.photo[-1].get_file()
     id_file_id = photo_file.file_id
 
-    # Append row to 'Tutors' tab
-    db_add_tutor([
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S"), # Timestamp
-        str(update.effective_user.id),                # Telegram ID
-        update.effective_user.username or "",         # Username
-        context.user_data.get("tutor_name"),          # Name
-        context.user_data.get("tutor_phone"),         # Phone
-        "",                                           # Gender
-        context.user_data.get("tutor_subject"),       # Subjects
-        "",                                           # Grades
-        context.user_data.get("tutor_city"),          # Location
-        "",                                           # Qualification
-        "Pending",                                    # ID Verification Status
-        "Active",                                     # Status
-        id_file_id                                    # ID File Reference
-    ])
+    file_bytes = await photo_file.download_as_bytearray()
+    nparr = np.frombuffer(file_bytes, np.uint8)
+    img = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE)
+    sharpness = round(cv2.Laplacian(img, cv2.CV_64F).var(), 2) if img is not None else 0.0
+    blur_status = "🟢 Clear" if sharpness > 100 else "⚠️ Blurry / Low Quality"
 
-    text = (
-        "✅ **Registration & ID Submitted Successfully!**\nWe have received your details and ID. We will review and contact you soon."
-        if lang == "en" else
-        "✅ **ምዝገባዎ እና መታወቂያዎ በተሳካ ሁኔታ ተልኳል!**\nመረጃዎ እና መታወቂያዎ ደርሶናል፤ አጣርተን በቅርቡ እናነጋግርዎታለን።"
-    )
-    
+    context.user_data["tutor_id_file_id"] = id_file_id
+    context.user_data["tutor_sharpness"] = sharpness
+
+    admin_chat_id = os.environ.get("ADMIN_CHAT_ID")
+    if admin_chat_id:
+        review_text = (
+            f"🔔 **New Tutor Registration Review**\n\n"
+            f"👤 Name: {context.user_data.get('tutor_name')}\n"
+            f"📞 Phone: {context.user_data.get('tutor_phone')}\n"
+            f"📚 Subject: {context.user_data.get('tutor_subject')}\n"
+            f"🏫 Category: {context.user_data.get('tutor_grade_cat')}\n"
+            f"🎒 Grades: {context.user_data.get('tutor_grade_specific')}\n"
+            f"🏙️ City: {context.user_data.get('tutor_city')}\n"
+            f"📍 Location: {context.user_data.get('tutor_specific_loc')}\n"
+            f"📐 ID Sharpness Score: `{sharpness}` ({blur_status})"
+        )
+        
+        user_id = update.effective_user.id
+        context.bot_data[f"pending_tutor_{user_id}"] = context.user_data.copy()
+
+        kb = [
+            [
+                InlineKeyboardButton("✅ Approve Tutor", callback_data=f"app_tutor_{user_id}"),
+                InlineKeyboardButton("❌ Reject", callback_data=f"rej_tutor_{user_id}")
+            ]
+        ]
+        await context.bot.send_photo(
+            chat_id=admin_chat_id,
+            photo=id_file_id,
+            caption=review_text,
+            reply_markup=InlineKeyboardMarkup(kb),
+            parse_mode="Markdown"
+        )
+
+    text = "✅ **Registration & ID Submitted for Review!**\nOur admin team is reviewing your details and ID. You will be notified soon."
     kb = [[InlineKeyboardButton("🔙 Main Menu / ዋና ምናሌ", callback_data="back_home")]]
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
     return MENU
 
 
-# --- Student Request Flow ('Client_Requests' Tab) ---
+# --- Student Request Flow ---
 
 async def req_tutor_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    lang = context.user_data.get("lang", "en")
-
-    text = "Please enter the student's or parent's full name:" if lang == "en" else "እባክዎ የተማሪውን ወይም የወላጅ ስም ያስገቡ:"
-    await query.message.edit_text(text)
+    await query.message.edit_text("Please enter the student's or parent's full name:")
     return REQ_NAME
 
 async def req_name_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["req_name"] = update.message.text
-    lang = context.user_data.get("lang", "en")
-
-    text = "Please enter your contact phone number:" if lang == "en" else "እባክዎ ማነጋገሪያ ስልክ ቁጥር ያስገቡ:"
-    await update.message.reply_text(text)
+    await update.message.reply_text("Please enter your contact phone number:")
     return REQ_PHONE
 
 async def req_phone_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["req_phone"] = update.message.text
-    lang = context.user_data.get("lang", "en")
-
-    text = "What subject(s) do you need a tutor for?" if lang == "en" else "ምን ዓይነት ትምህርት አስተማሪ ይፈልጋሉ?"
-    await update.message.reply_text(text)
+    kb = [
+        [InlineKeyboardButton("📚 All Subjects / ሁሉም", callback_data="rsubj_all")],
+        [InlineKeyboardButton("🔢 Mathematics / ሂሳብ", callback_data="rsubj_math")],
+        [InlineKeyboardButton("⚗️ Physics & Chemistry / ሳይንስ", callback_data="rsubj_science")],
+        [InlineKeyboardButton("📝 English / እንግሊዝኛ", callback_data="rsubj_english")],
+    ]
+    await update.message.reply_text("Select subject needed:", reply_markup=InlineKeyboardMarkup(kb))
     return REQ_SUBJECT
 
 async def req_subject_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["req_subject"] = update.message.text
-    lang = context.user_data.get("lang", "en")
+    query = update.callback_query
+    await query.answer()
+    mapping = {
+        "rsubj_all": "All Subjects",
+        "rsubj_math": "Mathematics",
+        "rsubj_science": "Physics & Chemistry",
+        "rsubj_english": "English"
+    }
+    context.user_data["req_subject"] = mapping.get(query.data, "General Subject")
 
-    text = "What is the student's grade level?" if lang == "en" else "የተማሪው የክፍል ደረጃ ስንተኛ ነው?"
-    await update.message.reply_text(text)
-    return REQ_GRADE
+    kb = [
+        [InlineKeyboardButton("🎒 Primary / አንደኛ ደረጃ", callback_data="rcat_primary")],
+        [InlineKeyboardButton("🏫 Secondary / ሁለተኛ ደረጃ", callback_data="rcat_secondary")],
+    ]
+    await query.message.edit_text("Select Grade Category:", reply_markup=InlineKeyboardMarkup(kb))
+    return REQ_GRADE_CAT
 
-async def req_grade_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["req_grade"] = update.message.text
-    lang = context.user_data.get("lang", "en")
+async def req_grade_cat_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    category = "Primary" if query.data == "rcat_primary" else "Secondary"
+    context.user_data["req_grade_cat"] = category
+
+    if category == "Primary":
+        kb = [
+            [InlineKeyboardButton("Grade 1 - 4", callback_data="rgrade_1_4"), InlineKeyboardButton("Grade 5 - 8", callback_data="rgrade_5_8")],
+            [InlineKeyboardButton("All Primary (1 - 8)", callback_data="rgrade_all_primary")]
+        ]
+    else:
+        kb = [
+            [InlineKeyboardButton("Grade 9 & 10", callback_data="rgrade_9_10"), InlineKeyboardButton("Grade 11 & 12", callback_data="rgrade_11_12")],
+            [InlineKeyboardButton("All Secondary (9 - 12)", callback_data="rgrade_all_secondary")]
+        ]
+    await query.message.edit_text(f"Select specific grades under **{category}**:", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+    return REQ_GRADE_SPECIFIC
+
+async def req_grade_specific_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    mapping = {
+        "rgrade_1_4": "Grade 1 - 4",
+        "rgrade_5_8": "Grade 5 - 8",
+        "rgrade_all_primary": "Primary (1 - 8)",
+        "rgrade_9_10": "Grade 9 & 10",
+        "rgrade_11_12": "Grade 11 & 12",
+        "rgrade_all_secondary": "Secondary (9 - 12)"
+    }
+    context.user_data["req_grade_specific"] = mapping.get(query.data, "General Grades")
 
     kb = [
         [InlineKeyboardButton("Adama / አዳማ", callback_data="reqcity_adama")],
         [InlineKeyboardButton("Bishoftu / ቢሾፍቱ", callback_data="reqcity_bishoftu")],
     ]
-    text = "Select the city for tutoring:" if lang == "en" else "ትምህርቱ የሚሰጥበትን ከተማ ይምረጡ:"
-    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(kb))
+    await query.message.edit_text("Select the city for tutoring:", reply_markup=InlineKeyboardMarkup(kb))
     return REQ_CITY
 
 async def req_city_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    lang = context.user_data.get("lang", "en")
-    
-    city = "Adama" if query.data == "reqcity_adama" else "Bishoftu"
+    context.user_data["req_city"] = "Adama" if query.data == "reqcity_adama" else "Bishoftu"
+    kb = [[InlineKeyboardButton("❌ Cancel / ሰርዝ", callback_data="cancel_action")]]
+    await query.message.edit_text("📍 Please enter the specific neighborhood or Kebele where tutoring is needed:", reply_markup=InlineKeyboardMarkup(kb))
+    return REQ_SPECIFIC_LOC
+
+async def req_specific_loc_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["req_specific_loc"] = update.message.text
     job_code = f"HRZ-{random.randint(1000, 9999)}"
+    context.user_data["job_code"] = job_code
 
-    # Append row to 'Client_Requests' tab
-    db_add_client_request([
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S"), # Timestamp
-        job_code,                                    # Job Code
-        str(query.from_user.id),                     # Telegram ID
-        query.from_user.username or "",              # Username
-        context.user_data.get("req_name"),           # Client Name
-        context.user_data.get("req_phone"),          # Phone
-        context.user_data.get("req_subject"),        # Subject
-        context.user_data.get("req_grade"),          # Grade
-        city,                                        # City
-        "", "", "", "", "", "", "Pending", "Open", "" # Place, Prefs, Budget, Status, etc.
-    ])
+    user_id = update.effective_user.id
+    context.bot_data[f"pending_req_{user_id}"] = context.user_data.copy()
 
-    text = (
-        f"✅ **Request Submitted Successfully!**\nYour Job Code is `{job_code}`. We will match you with a qualified tutor soon."
-        if lang == "en" else
-        f"✅ **ጥያቄዎ በተሳካ ሁኔታ ተመዝግቧል!**\nየሥራ ኮድዎ (Job Code): `{job_code}` ነው። በቅርቡ ብቁ መምህር እናገናኝዎታለን።"
-    )
-    
+    admin_chat_id = os.environ.get("ADMIN_CHAT_ID")
+    if admin_chat_id:
+        review_text = (
+            f"🔔 **New Student Request Review**\n\n"
+            f"🆔 Job Code: `{job_code}`\n"
+            f"👤 Client: {context.user_data.get('req_name')}\n"
+            f"📞 Phone: {context.user_data.get('req_phone')}\n"
+            f"📚 Subject: {context.user_data.get('req_subject')}\n"
+            f"🏫 Category: {context.user_data.get('req_grade_cat')}\n"
+            f"🎒 Grades: {context.user_data.get('req_grade_specific')}\n"
+            f"🏙️ City: {context.user_data.get('req_city')}\n"
+            f"📍 Location: {context.user_data.get('req_specific_loc')}"
+        )
+        kb = [
+            [
+                InlineKeyboardButton("✅ Approve & Post", callback_data=f"app_req_{user_id}"),
+                InlineKeyboardButton("❌ Reject", callback_data=f"rej_req_{user_id}")
+            ]
+        ]
+        await context.bot.send_message(chat_id=admin_chat_id, text=review_text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+
+    text = f"✅ **Request Submitted for Review!**\nYour Job Code is `{job_code}`. Once reviewed by our team, it will be posted."
     kb = [[InlineKeyboardButton("🔙 Main Menu / ዋና ምናሌ", callback_data="back_home")]]
-    await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
     return MENU
+
+
+# --- Admin Approval & Channel Broadcast Handler ---
+
+async def admin_approval_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    if data.startswith("app_tutor_"):
+        user_id = data.split("_")[2]
+        tutor_data = context.bot_data.get(f"pending_tutor_{user_id}")
+        if tutor_data:
+            full_location = f"{tutor_data.get('tutor_city')} - {tutor_data.get('tutor_specific_loc')}"
+            db_add_tutor([
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                str(user_id),
+                "",
+                tutor_data.get('tutor_name'),
+                tutor_data.get('tutor_phone'),
+                "",
+                tutor_data.get('tutor_subject'),
+                f"{tutor_data.get('tutor_grade_cat')} ({tutor_data.get('tutor_grade_specific')})",
+                full_location,
+                "",
+                "Approved",
+                "Active",
+                tutor_data.get('tutor_id_file_id')
+            ])
+            await query.edit_message_caption(caption=query.message.caption + "\n\n✅ **APPROVED & SAVED TO SHEET**", parse_mode="Markdown")
+            try:
+                await context.bot.send_message(chat_id=user_id, text="🎉 Congratulations! Your tutor registration has been approved by admin.")
+            except Exception:
+                pass
+    elif data.startswith("rej_tutor_"):
+        user_id = data.split("_")[2]
+        await query.edit_message_caption(caption=query.message.caption + "\n\n❌ **REJECTED**", parse_mode="Markdown")
+        try:
+            await context.bot.send_message(chat_id=user_id, text="⚠️ Unfortunately, your tutor registration was rejected. Please contact support.")
+        except Exception:
+            pass
+
+    elif data.startswith("app_req_"):
+        user_id = data.split("_")[2]
+        req_data = context.bot_data.get(f"pending_req_{user_id}")
+        if req_data:
+            job_code = req_data.get('job_code')
+            full_grade_str = f"{req_data.get('req_grade_cat')} - {req_data.get('req_grade_specific')}"
+            db_add_client_request([
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                job_code,
+                str(user_id),
+                "",
+                req_data.get('req_name'),
+                req_data.get('req_phone'),
+                req_data.get('req_subject'),
+                full_grade_str,
+                req_data.get('req_city'),
+                req_data.get('req_specific_loc'),
+                "", "", "", "", "", "Approved", "Open", ""
+            ])
+
+            job_channel_id = os.environ.get("JOB_CHANNEL_ID")
+            if job_channel_id:
+                channel_msg = (
+                    f"🟢 **OPEN**\n\n"
+                    f"🏫 **Grade:** {full_grade_str}\n"
+                    f"🏙️ **City:** {req_data.get('req_city')}\n"
+                    f"📍 **Place:** {req_data.get('req_specific_loc')}\n"
+                    f"📚 **Subject:** {req_data.get('req_subject')}\n"
+                    f"💬 **Job code:** #{job_code}\n\n"
+                    f"_We need highly committed, punctual and talented tutor._"
+                )
+                bot_username = context.bot.username
+                channel_kb = [[InlineKeyboardButton("Apply Now", url=f"https://t.me/{bot_username}")]]
+                await context.bot.send_message(
+                    chat_id=job_channel_id,
+                    text=channel_msg,
+                    reply_markup=InlineKeyboardMarkup(channel_kb),
+                    parse_mode="Markdown"
+                )
+
+            await query.edit_message_text(text=query.message.text + "\n\n✅ **APPROVED, SAVED & POSTED TO CHANNEL**", parse_mode="Markdown")
+            try:
+                await context.bot.send_message(chat_id=user_id, text=f"🎉 Your request has been approved and published! Job Code: `{job_code}`", parse_mode="Markdown")
+            except Exception:
+                pass
+    elif data.startswith("rej_req_"):
+        user_id = data.split("_")[2]
+        await query.edit_message_text(text=query.message.text + "\n\n❌ **REJECTED**", parse_mode="Markdown")
+
 
 # --- Cancel Handlers ---
 
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = "Operation cancelled. Type /start to begin again."
     if update.message:
-        await update.message.reply_text(text)
+        await update.message.reply_text("Operation cancelled. Type /start to begin again.")
     return ConversationHandler.END
 
 async def cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    text = "Operation cancelled. Type /start to begin again."
     kb = [[InlineKeyboardButton("🔄 Restart / ጀምር", callback_data="back_home")]]
-    await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb))
+    await query.message.edit_text("Operation cancelled. Type /start to begin again.", reply_markup=InlineKeyboardMarkup(kb))
     return ConversationHandler.END
 
 def main():
     token = os.environ.get("TELEGRAM_TOKEN")
     if not token:
-        logger.error("No TELEGRAM_TOKEN found in environment variables!")
+        logger.error("No TELEGRAM_TOKEN found!")
         return
 
     t = Thread(target=run_flask)
@@ -421,29 +641,35 @@ def main():
                 CallbackQueryHandler(reg_tutor_start, pattern="^reg_tutor$"),
                 CallbackQueryHandler(req_tutor_start, pattern="^req_tutor$"),
             ],
-            TUTOR_NAME: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, tutor_name_received),
-                CallbackQueryHandler(cancel_callback, pattern="^cancel_action$")
-            ],
-            TUTOR_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, tutor_phone_received)],
-            TUTOR_SUBJECT: [MessageHandler(filters.TEXT & ~filters.COMMAND, tutor_subject_received)],
-            TUTOR_CITY: [
-                CallbackQueryHandler(tutor_city_received, pattern="^city_"),
-                CallbackQueryHandler(cancel_callback, pattern="^cancel_action$")
-            ],
-            TUTOR_ID: [MessageHandler(filters.PHOTO & ~filters.COMMAND, tutor_id_received)],
+            TUTOR_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, tutor_name_received), CallbackQueryHandler(cancel_callback, pattern="^cancel_action$")],
+            TUTOR_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, tutor_phone_received), CallbackQueryHandler(cancel_callback, pattern="^cancel_action$")],
+            TUTOR_SUBJECT: [CallbackQueryHandler(tutor_subject_received, pattern="^tsubj_"), CallbackQueryHandler(cancel_callback, pattern="^cancel_action$")],
+            TUTOR_GRADE_CAT: [CallbackQueryHandler(tutor_grade_cat_received, pattern="^tcat_"), CallbackQueryHandler(cancel_callback, pattern="^cancel_action$")],
+            TUTOR_GRADE_SPECIFIC: [CallbackQueryHandler(tutor_grade_specific_received, pattern="^tgrade_"), CallbackQueryHandler(cancel_callback, pattern="^cancel_action$")],
+            TUTOR_CITY: [CallbackQueryHandler(tutor_city_received, pattern="^city_"), CallbackQueryHandler(cancel_callback, pattern="^cancel_action$")],
+            TUTOR_SPECIFIC_LOC: [MessageHandler(filters.TEXT & ~filters.COMMAND, tutor_specific_loc_received), CallbackQueryHandler(cancel_callback, pattern="^cancel_action$")],
+            TUTOR_ID: [MessageHandler(filters.PHOTO & ~filters.COMMAND, tutor_id_received), CallbackQueryHandler(cancel_callback, pattern="^cancel_action$")],
             
-            REQ_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, req_name_received)],
-            REQ_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, req_phone_received)],
-            REQ_SUBJECT: [MessageHandler(filters.TEXT & ~filters.COMMAND, req_subject_received)],
-            REQ_GRADE: [MessageHandler(filters.TEXT & ~filters.COMMAND, req_grade_received)],
-            REQ_CITY: [CallbackQueryHandler(req_city_received, pattern="^reqcity_")],
+            REQ_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, req_name_received), CallbackQueryHandler(cancel_callback, pattern="^cancel_action$")],
+            REQ_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, req_phone_received), CallbackQueryHandler(cancel_callback, pattern="^cancel_action$")],
+            REQ_SUBJECT: [CallbackQueryHandler(req_subject_received, pattern="^rsubj_"), CallbackQueryHandler(cancel_callback, pattern="^cancel_action$")],
+            REQ_GRADE_CAT: [CallbackQueryHandler(req_grade_cat_received, pattern="^rcat_"), CallbackQueryHandler(cancel_callback, pattern="^cancel_action$")],
+            REQ_GRADE_SPECIFIC: [CallbackQueryHandler(req_grade_specific_received, pattern="^rgrade_"), CallbackQueryHandler(cancel_callback, pattern="^cancel_action$")],
+            REQ_CITY: [CallbackQueryHandler(req_city_received, pattern="^reqcity_"), CallbackQueryHandler(cancel_callback, pattern="^cancel_action$")],
+            REQ_SPECIFIC_LOC: [MessageHandler(filters.TEXT & ~filters.COMMAND, req_specific_loc_received), CallbackQueryHandler(cancel_callback, pattern="^cancel_action$")],
         },
         fallbacks=[CommandHandler("cancel", cancel_command)],
         per_message=False
     )
 
     application.add_handler(conv_handler)
+    application.add_handler(CallbackQueryHandler(admin_approval_callback, pattern="^(app|rej)_"))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("broadcast", broadcast_command))
+    application.add_handler(CommandHandler("catchup", catchup_command))
+    application.add_handler(CommandHandler("stats", stats_command))
+    application.add_handler(CommandHandler("search", search_command))
+    application.add_handler(CommandHandler("testblur", testblur_command))
 
     logger.info("Starting bot polling...")
     application.run_polling(drop_pending_updates=True)

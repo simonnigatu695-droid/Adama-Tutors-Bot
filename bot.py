@@ -6,6 +6,7 @@ import json
 import cv2
 import numpy as np
 import io
+import asyncio
 from flask import Flask
 from threading import Thread
 import gspread
@@ -43,7 +44,7 @@ def run_flask():
 # Google Sheets Setup supporting multiple environment variable keys & fallback paths
 def get_gspread_client():
     try:
-        env_creds = os.environ.get("GOOGLE_CREDENTIALS_JSON") or os.environ.get("credentials.json")
+        env_creds = os.environ.get("credentials.json") or os.environ.get("GOOGLE_CREDENTIALS_JSON")
         if env_creds:
             logger.info("✅ Loading credentials from environment variable")
             creds_dict = json.loads(env_creds)
@@ -109,7 +110,7 @@ def upload_id_to_drive(file_bytes, file_name):
                 cred_path = path
                 break
 
-        env_creds = os.environ.get("GOOGLE_CREDENTIALS_JSON")
+        env_creds = os.environ.get("credentials.json") or os.environ.get("GOOGLE_CREDENTIALS_JSON")
         if env_creds:
             creds_dict = json.loads(env_creds)
             creds = service_account.Credentials.from_service_account_info(
@@ -695,6 +696,9 @@ def main():
     t.start()
 
     application = Application.builder().token(token).post_init(post_init).build()
+
+    # Explicitly set event loop for Python 3.14 compatibility
+    asyncio.set_event_loop(asyncio.new_event_loop())
 
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],

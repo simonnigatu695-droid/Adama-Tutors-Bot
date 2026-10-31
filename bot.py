@@ -58,11 +58,7 @@ def get_gspread_client():
             "credentials.json",
             os.path.join(os.getcwd(), "credentials.json")
         ]
-        cred_path = None
-        for path in possible_paths:
-            if os.path.exists(path):
-                cred_path = path
-                break
+        cred_path = next((path for path in possible_paths if os.path.exists(path)), None)
         
         if not cred_path:
             logger.error("❌ GSPREAD ERROR: credentials.json could not be found anywhere!")
@@ -104,13 +100,9 @@ def upload_id_to_drive(file_bytes, file_name):
             "credentials.json",
             os.path.join(os.getcwd(), "credentials.json")
         ]
-        cred_path = None
-        for path in possible_paths:
-            if os.path.exists(path):
-                cred_path = path
-                break
-
+        cred_path = next((path for path in possible_paths if os.path.exists(path)), None)
         env_creds = os.environ.get("credentials.json") or os.environ.get("GOOGLE_CREDENTIALS_JSON")
+        
         if env_creds:
             creds_dict = json.loads(env_creds)
             creds = service_account.Credentials.from_service_account_info(
@@ -149,8 +141,8 @@ def upload_id_to_drive(file_bytes, file_name):
 (
     LANG, MENU, 
     TUTOR_NAME, TUTOR_PHONE, TUTOR_GENDER, TUTOR_SUBJECT, TUTOR_GRADE_CAT, TUTOR_GRADE_SPECIFIC, TUTOR_CITY, TUTOR_SPECIFIC_LOC, TUTOR_ID,
-    REQ_NAME, REQ_PHONE, REQ_SUBJECT, REQ_GRADE_CAT, REQ_GRADE_SPECIFIC, REQ_CITY, REQ_SPECIFIC_LOC, REQ_BUDGET
-) = range(19)
+    REQ_NAME, REQ_PHONE, REQ_SUBJECT, REQ_GRADE_CAT, REQ_GRADE_SPECIFIC, REQ_CITY, REQ_SPECIFIC_LOC, REQ_GENDER_PREF, REQ_BUDGET
+) = range(20)
 
 async def post_init(application: Application):
     commands = [
@@ -313,10 +305,7 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         ws = sheet.worksheet("Tutors")
         rows = ws.get_all_values()
-        matches = []
-        for row in rows[1:]:
-            if query_keyword in " ".join(row).lower():
-                matches.append(f"👤 **{row[3]}**\n📞 `{row[4]}`\n📚 {row[6]} ({row[7]})\n📍 {row[8]}\n")
+        matches = [f"👤 **{row[3]}**\n📞 `{row[4]}`\n📚 {row[6]} ({row[7]})\n📍 {row[8]}\n" for row in rows[1:] if query_keyword in " ".join(row).lower()]
         if matches:
             await update.message.reply_text(f"🔍 **Search Results:**\n\n" + "\n".join(matches[:10]), parse_mode="Markdown")
         else:
@@ -352,7 +341,7 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🏫 **Grade:** {found_row[7]}\n"
             f"🏙️ **City:** {found_row[8]} ({found_row[9]})\n"
             f"📚 **Subject:** {found_row[6]}\n"
-            f"💰 **Budget:** {found_row[10]}\n"
+            f"💰 **Budget:** {found_row[12]}\n"
             f"💬 **Job code:** #{job_code_target}\n\n"
             f"💡 *Policy: 1-day trial session. Agency commission (50%) applies after successful trial.*"
         )
@@ -459,7 +448,6 @@ async def tutor_city_received(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def tutor_specific_loc_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["tutor_specific_loc"] = update.message.text
-    context.user_data["tutor_budget"] = "N/A"
     await update.message.reply_text("📷 Please upload a clear photo of your National ID card:")
     return TUTOR_ID
 
@@ -561,29 +549,51 @@ async def req_city_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     context.user_data["req_city"] = "Adama" if query.data == "reqcity_adama" else "Bishoftu"
-    await query.message.edit_text("📍 Enter specific neighborhood or Kebele:")
+    await query.message.edit_text("📍 Enter specific neighborhood or Kebele (Place):")
     return REQ_SPECIFIC_LOC
 
 async def req_specific_loc_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["req_specific_loc"] = update.message.text
+    kb = [
+        [InlineKeyboardButton("👨 Male Tutor", callback_data="rgend_male")],
+        [InlineKeyboardButton("👩 Female Tutor", callback_data="rgend_female")],
+        [InlineKeyboardButton("⭐ Any Gender", callback_data="rgend_any")]
+    ]
+    await update.message.reply_text("Select preferred tutor gender:", reply_markup=InlineKeyboardMarkup(kb))
+    return REQ_GENDER_PREF
+
+async def req_gender_pref_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    mapping = {"rgend_male": "Male", "rgend_female": "Female", "rgend_any": "Any"}
+    context.user_data["req_gender_pref"] = mapping.get(query.data, "Any")
     kb = [[InlineKeyboardButton("🤝 Negotiable", callback_data="rbudget_negotiable")]]
-    await update.message.reply_text("💰 Click Negotiable or type your budget:", reply_markup=InlineKeyboardMarkup(kb))
+    await query.message.edit_text("💰 Click Negotiable or type your budget:", reply_markup=InlineKeyboardMarkup(kb))
     return REQ_BUDGET
 
 async def req_budget_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     context.user_data["req_budget"] = "Negotiable 🤝"
+    context.user_data["req_budget_num"] = "0"
     return await finalize_client_request(query.message, context)
 
 async def req_budget_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["req_budget"] = update.message.text
+    val = update.message.text
+    context.user_data["req_budget"] = val
+    context.user_data["req_budget_num"] = ''.join(filter(str.isdigit, val)) or "0"
     return await finalize_client_request(update.message, context)
 
 async def finalize_client_request(message_obj, context):
     job_code = f"HRZ-{random.randint(1000, 9999)}"
     context.user_data["job_code"] = job_code
-    session_key = f"pending_req_{message_obj.chat_id}_{int(datetime.now().timestamp())}"
+    user = update_user = message_obj.chat if hasattr(message_obj, "chat") else message_obj.chat_id
+    user_id = message_obj.chat.id if hasattr(message_obj, "chat") else message_obj.chat_id
+    
+    context.user_data["client_telegram_id"] = user_id
+    context.user_data["client_username"] = f"@{message_obj.chat.username}" if hasattr(message_obj, "chat") and message_obj.chat.username else "N/A"
+
+    session_key = f"pending_req_{user_id}_{int(datetime.now().timestamp())}"
     context.bot_data[session_key] = context.user_data.copy()
 
     admin_chat_id = os.environ.get("ADMIN_CHAT_ID")
@@ -596,6 +606,7 @@ async def finalize_client_request(message_obj, context):
             f"📚 Subject: {context.user_data.get('req_subject')}\n"
             f"🏫 Grade: {context.user_data.get('req_grade_cat')} - {context.user_data.get('req_grade_specific')}\n"
             f"🏙️ Location: {context.user_data.get('req_city')} ({context.user_data.get('req_specific_loc')})\n"
+            f"⚧️ Tutor Gender Pref: {context.user_data.get('req_gender_pref')}\n"
             f"💰 Budget: {context.user_data.get('req_budget')}"
         )
         kb = [[InlineKeyboardButton("✅ Approve & Post", callback_data=f"app_req_{session_key}"), InlineKeyboardButton("❌ Reject", callback_data=f"rej_req_{session_key}")]]
@@ -622,21 +633,23 @@ async def admin_approval_callback(update: Update, context: ContextTypes.DEFAULT_
         tutor_data = context.bot_data.get(session_key)
         if tutor_data:
             full_location = f"{tutor_data.get('tutor_city')} - {tutor_data.get('tutor_specific_loc')}"
+            # Exact mapping for 'Tutors' tab (13 columns)
             db_add_tutor([
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                str(tutor_data.get('telegram_id')),
-                tutor_data.get('tutor_username', 'N/A'),
-                tutor_data.get('tutor_name'),
-                str(tutor_data.get('tutor_phone')),
-                tutor_data.get('tutor_gender'),
-                tutor_data.get('tutor_subject'),
-                f"{tutor_data.get('tutor_grade_cat')} - {tutor_data.get('tutor_grade_specific')}",
-                full_location,
-                "N/A",
-                "Approved",
-                tutor_data.get('tutor_drive_link', 'N/A')
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"), # Timestamp
+                str(tutor_data.get('telegram_id')),          # Telegram ID
+                tutor_data.get('tutor_username', 'N/A'),     # Username
+                tutor_data.get('tutor_name'),                # Name
+                str(tutor_data.get('tutor_phone')),          # Phone
+                tutor_data.get('tutor_gender'),              # Gender
+                tutor_data.get('tutor_subject'),             # Subjects
+                f"{tutor_data.get('tutor_grade_cat')} - {tutor_data.get('tutor_grade_specific')}", # Grades
+                full_location,                               # Location
+                "N/A",                                       # Qualification
+                "Approved",                                  # ID Verification Status
+                "Active",                                    # Status
+                tutor_data.get('tutor_drive_link', 'N/A')    # ID File ID
             ])
-            await query.edit_message_caption(caption=query.message.caption + "\n\n✅ **APPROVED & SAVED (Username & Drive Linked)**", parse_mode="Markdown")
+            await query.edit_message_caption(caption=query.message.caption + "\n\n✅ **APPROVED & SAVED TO SHEET**", parse_mode="Markdown")
             try:
                 await context.bot.send_message(chat_id=tutor_data.get('telegram_id'), text="🎉 Your tutor registration has been approved!")
             except Exception:
@@ -649,12 +662,26 @@ async def admin_approval_callback(update: Update, context: ContextTypes.DEFAULT_
         if req_data:
             job_code = req_data.get('job_code')
             full_grade = f"{req_data.get('req_grade_cat')} - {req_data.get('req_grade_specific')}"
+            # Exact mapping for 'Client_Requests' tab (16 columns)
             db_add_client_request([
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                job_code, "", "", req_data.get('req_name'), req_data.get('req_phone'),
-                req_data.get('req_subject'), full_grade, req_data.get('req_city'),
-                req_data.get('req_specific_loc'), req_data.get('req_budget'),
-                "", "", "", "", "Approved", "Open", ""
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"), # Timestamp
+                job_code,                                    # Job Code
+                str(req_data.get('client_telegram_id', '')), # Telegram ID
+                req_data.get('client_username', 'N/A'),      # Username
+                req_data.get('req_name'),                    # Client Name
+                str(req_data.get('req_phone')),              # Phone
+                req_data.get('req_subject'),                 # Subject
+                full_grade,                                  # Grade
+                req_data.get('req_city'),                    # City
+                req_data.get('req_specific_loc'),            # Place
+                req_data.get('req_gender_pref', 'Any'),      # Tutor Gender Pref
+                "1 Month",                                   # Duration
+                req_data.get('req_budget'),                  # Budget
+                req_data.get('req_budget_num', '0'),         # Budget Number
+                "50%",                                       # Commission Terms
+                "Approved",                                  # Verification
+                "Open",                                      # Job Status
+                ""                                           # Channel Msg ID
             ])
             job_channel_id = os.environ.get("JOB_CHANNEL_ID")
             if job_channel_id:
@@ -714,6 +741,7 @@ def main():
             TUTOR_GENDER: [CallbackQueryHandler(tutor_gender_received, pattern="^tgen_")],
             TUTOR_SUBJECT: [CallbackQueryHandler(tutor_subject_received, pattern="^tsubj_")],
             TUTOR_GRADE_CAT: [CallbackQueryHandler(tutor_grade_cat_received, pattern="^tcat_")],
+            TUP_GRADE_SPECIFIC: [CallbackQueryHandler(tutor_grade_specific_received, pattern="^tgrade_")], # Handled by TUTOR_GRADE_SPECIFIC state
             TUTOR_GRADE_SPECIFIC: [CallbackQueryHandler(tutor_grade_specific_received, pattern="^tgrade_")],
             TUTOR_CITY: [CallbackQueryHandler(tutor_city_received, pattern="^city_")],
             TUTOR_SPECIFIC_LOC: [MessageHandler(filters.TEXT & ~filters.COMMAND, tutor_specific_loc_received)],
@@ -726,6 +754,7 @@ def main():
             REQ_GRADE_SPECIFIC: [CallbackQueryHandler(req_grade_specific_received, pattern="^rgrade_")],
             REQ_CITY: [CallbackQueryHandler(req_city_received, pattern="^reqcity_")],
             REQ_SPECIFIC_LOC: [MessageHandler(filters.TEXT & ~filters.COMMAND, req_specific_loc_received)],
+            REQ_GENDER_PREF: [CallbackQueryHandler(req_gender_pref_received, pattern="^rgend_")],
             REQ_BUDGET: [
                 CallbackQueryHandler(req_budget_callback, pattern="^rbudget_"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, req_budget_text)

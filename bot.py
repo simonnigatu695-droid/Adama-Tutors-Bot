@@ -587,7 +587,6 @@ async def req_budget_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def finalize_client_request(message_obj, context):
     job_code = f"HRZ-{random.randint(1000, 9999)}"
     context.user_data["job_code"] = job_code
-    user = update_user = message_obj.chat if hasattr(message_obj, "chat") else message_obj.chat_id
     user_id = message_obj.chat.id if hasattr(message_obj, "chat") else message_obj.chat_id
     
     context.user_data["client_telegram_id"] = user_id
@@ -633,21 +632,20 @@ async def admin_approval_callback(update: Update, context: ContextTypes.DEFAULT_
         tutor_data = context.bot_data.get(session_key)
         if tutor_data:
             full_location = f"{tutor_data.get('tutor_city')} - {tutor_data.get('tutor_specific_loc')}"
-            # Exact mapping for 'Tutors' tab (13 columns)
             db_add_tutor([
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"), # Timestamp
-                str(tutor_data.get('telegram_id')),          # Telegram ID
-                tutor_data.get('tutor_username', 'N/A'),     # Username
-                tutor_data.get('tutor_name'),                # Name
-                str(tutor_data.get('tutor_phone')),          # Phone
-                tutor_data.get('tutor_gender'),              # Gender
-                tutor_data.get('tutor_subject'),             # Subjects
-                f"{tutor_data.get('tutor_grade_cat')} - {tutor_data.get('tutor_grade_specific')}", # Grades
-                full_location,                               # Location
-                "N/A",                                       # Qualification
-                "Approved",                                  # ID Verification Status
-                "Active",                                    # Status
-                tutor_data.get('tutor_drive_link', 'N/A')    # ID File ID
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                str(tutor_data.get('telegram_id')),
+                tutor_data.get('tutor_username', 'N/A'),
+                tutor_data.get('tutor_name'),
+                str(tutor_data.get('tutor_phone')),
+                tutor_data.get('tutor_gender'),
+                tutor_data.get('tutor_subject'),
+                f"{tutor_data.get('tutor_grade_cat')} - {tutor_data.get('tutor_grade_specific')}",
+                full_location,
+                "N/A",
+                "Approved",
+                "Active",
+                tutor_data.get('tutor_drive_link', 'N/A')
             ])
             await query.edit_message_caption(caption=query.message.caption + "\n\n✅ **APPROVED & SAVED TO SHEET**", parse_mode="Markdown")
             try:
@@ -662,26 +660,25 @@ async def admin_approval_callback(update: Update, context: ContextTypes.DEFAULT_
         if req_data:
             job_code = req_data.get('job_code')
             full_grade = f"{req_data.get('req_grade_cat')} - {req_data.get('req_grade_specific')}"
-            # Exact mapping for 'Client_Requests' tab (16 columns)
             db_add_client_request([
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"), # Timestamp
-                job_code,                                    # Job Code
-                str(req_data.get('client_telegram_id', '')), # Telegram ID
-                req_data.get('client_username', 'N/A'),      # Username
-                req_data.get('req_name'),                    # Client Name
-                str(req_data.get('req_phone')),              # Phone
-                req_data.get('req_subject'),                 # Subject
-                full_grade,                                  # Grade
-                req_data.get('req_city'),                    # City
-                req_data.get('req_specific_loc'),            # Place
-                req_data.get('req_gender_pref', 'Any'),      # Tutor Gender Pref
-                "1 Month",                                   # Duration
-                req_data.get('req_budget'),                  # Budget
-                req_data.get('req_budget_num', '0'),         # Budget Number
-                "50%",                                       # Commission Terms
-                "Approved",                                  # Verification
-                "Open",                                      # Job Status
-                ""                                           # Channel Msg ID
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                job_code,
+                str(req_data.get('client_telegram_id', '')),
+                req_data.get('client_username', 'N/A'),
+                req_data.get('req_name'),
+                str(req_data.get('req_phone')),
+                req_data.get('req_subject'),
+                full_grade,
+                req_data.get('req_city'),
+                req_data.get('req_specific_loc'),
+                req_data.get('req_gender_pref', 'Any'),
+                "1 Month",
+                req_data.get('req_budget'),
+                req_data.get('req_budget_num', '0'),
+                "50%",
+                "Approved",
+                "Open",
+                ""
             ])
             job_channel_id = os.environ.get("JOB_CHANNEL_ID")
             if job_channel_id:
@@ -741,7 +738,6 @@ def main():
             TUTOR_GENDER: [CallbackQueryHandler(tutor_gender_received, pattern="^tgen_")],
             TUTOR_SUBJECT: [CallbackQueryHandler(tutor_subject_received, pattern="^tsubj_")],
             TUTOR_GRADE_CAT: [CallbackQueryHandler(tutor_grade_cat_received, pattern="^tcat_")],
-            TUP_GRADE_SPECIFIC: [CallbackQueryHandler(tutor_grade_specific_received, pattern="^tgrade_")], # Handled by TUTOR_GRADE_SPECIFIC state
             TUTOR_GRADE_SPECIFIC: [CallbackQueryHandler(tutor_grade_specific_received, pattern="^tgrade_")],
             TUTOR_CITY: [CallbackQueryHandler(tutor_city_received, pattern="^city_")],
             TUTOR_SPECIFIC_LOC: [MessageHandler(filters.TEXT & ~filters.COMMAND, tutor_specific_loc_received)],

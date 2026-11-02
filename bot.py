@@ -633,7 +633,7 @@ async def finalize_client_request(message_obj, context):
             f"⚧️ Tutor Gender Pref: {context.user_data.get('req_gender_pref')}\n"
             f"💰 Budget: {context.user_data.get('req_budget')}"
         )
-        kb = [[InlineKeyboardButton("✅ Approve & Post", callback_data=f"app_req_{session_key}"), InlineKeyboardButton("❌ Reject", callback_data=f"rej_req_{session_key})]]
+        kb = [[InlineKeyboardButton("✅ Approve & Post", callback_data=f"app_req_{session_key}"), InlineKeyboardButton("❌ Reject", callback_data=f"rej_req_{session_key}")]]
         await context.bot.send_message(chat_id=admin_chat_id, text=review_text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
 
     channel_link = os.environ.get("CHANNEL_INVITE_LINK", "https://t.me/HorizonTutorsHub")

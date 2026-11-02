@@ -117,7 +117,7 @@ def upload_id_to_drive(file_bytes, file_name):
             return None
 
         service = build('drive', 'v3', credentials=creds)
-        folder_id = "1eMruxEtVhLLi1607zwbZIeerr-MxVAE4"
+        folder_id = "1TPt6gHg4ff3PQIbj64ZiLUfIi3IZjQkP"
 
         file_metadata = {
             'name': file_name,
@@ -131,7 +131,7 @@ def upload_id_to_drive(file_bytes, file_name):
             fields='id, webViewLink'
         ).execute()
         
-        logger.info(f"✅ ID successfully uploaded to Google Drive: {file.get('webViewLink')}")
+        logger.info(f"✅ ID successfully uploaded to Google Drive")
         return file.get('webViewLink')
     except Exception as e:
         logger.error(f"❌ Failed to upload ID to Google Drive: {str(e)}")

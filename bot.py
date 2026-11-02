@@ -13,7 +13,6 @@ import gspread
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
-from PIL import Image, ImageOps
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, BotCommand
 from telegram.ext import (
     Application,
@@ -94,23 +93,8 @@ def db_add_client_request(data):
         except Exception as e:
             logger.error(f"❌ FAILED to append to 'Client_Requests' tab: {str(e)}")
 
-def convert_image_to_pdf_bytes(file_bytes):
-    """Converts raw image bytes into a clean PDF byte stream using Pillow with EXIF and color normalization."""
-    try:
-        image = Image.open(io.BytesIO(file_bytes))
-        image = ImageOps.exif_transpose(image) # Fixes sideways/rotated phone photos automatically
-        if image.mode in ('RGBA', 'P', 'LA'):
-            image = image.convert('RGB')
-        pdf_buffer = io.BytesIO()
-        image.save(pdf_buffer, format='PDF', quality=90)
-        pdf_buffer.seek(0)
-        return pdf_buffer.getvalue()
-    except Exception as e:
-        logger.error(f"❌ Error converting image to PDF: {str(e)}")
-        return None
-
-def sync_upload_to_drive(file_bytes, file_name, is_pdf=False):
-    """Synchronous helper for uploading files to Google Drive."""
+def sync_upload_to_drive(file_bytes, file_name):
+    """Direct, reliable synchronous helper for uploading image files to Google Drive."""
     try:
         possible_paths = [
             "/etc/secrets/credentials.json",
@@ -136,13 +120,12 @@ def sync_upload_to_drive(file_bytes, file_name, is_pdf=False):
         service = build('drive', 'v3', credentials=creds)
         folder_id = "1TPt6gHg4ff3PQIbj64ZiLUfIi3IZjQkP"
 
-        mimetype = 'application/pdf' if is_pdf else 'image/jpeg'
         file_metadata = {
             'name': file_name,
             'parents': [folder_id]
         }
         
-        media = MediaIoBaseUpload(io.BytesIO(file_bytes), mimetype=mimetype, resumable=True)
+        media = MediaIoBaseUpload(io.BytesIO(file_bytes), mimetype='image/jpeg', resumable=True)
         file = service.files().create(
             body=file_metadata,
             media_body=media,
@@ -474,8 +457,6 @@ async def tutor_id_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Please upload an image file of your ID.")
         return TUTOR_ID
 
-    status_msg = await update.message.reply_text("⏳ Processing and converting your ID to PDF, please wait...")
-
     photo_file = await update.message.photo[-1].get_file()
     file_bytes = await photo_file.download_as_bytearray()
     
@@ -483,20 +464,15 @@ async def tutor_id_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     full_name = context.user_data.get('tutor_name', 'Tutor')
     safe_name = full_name.replace(" ", "_")
     username = f"@{user.username}" if user.username else f"id_{user.id}"
-    
-    # Convert Image to PDF in background thread
-    pdf_bytes = await asyncio.to_thread(convert_image_to_pdf_bytes, file_bytes)
-    pdf_file_name = f"{safe_name}_{username}.pdf" if pdf_bytes else f"{safe_name}_{username}.jpg"
-    upload_bytes = pdf_bytes if pdf_bytes else file_bytes
-    is_pdf = True if pdf_bytes else False
+    file_name = f"{safe_name}_{username}.jpg"
 
-    # Upload securely to Google Drive asynchronously
-    drive_link = await asyncio.to_thread(sync_upload_to_drive, upload_bytes, pdf_file_name, is_pdf)
+    # Upload directly and asynchronously to Google Drive without freezing
+    drive_link = await asyncio.to_thread(sync_upload_to_drive, file_bytes, file_name)
     context.user_data["tutor_drive_link"] = drive_link or "N/A"
     context.user_data["tutor_username"] = username
     context.user_data["telegram_id"] = user.id
 
-    # Compute sharpness
+    # Compute sharpness score via OpenCV
     nparr = np.frombuffer(file_bytes, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE)
     sharpness = round(cv2.Laplacian(img, cv2.CV_64F).var(), 2) if img is not None else 0.0
@@ -507,7 +483,7 @@ async def tutor_id_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     admin_chat_id = os.environ.get("ADMIN_CHAT_ID")
     if admin_chat_id:
         review_text = (
-            f"🔔 **New Tutor Review (PDF Converted)**\n\n"
+            f"🔔 **New Tutor Review**\n\n"
             f"👤 Name: {full_name}\n"
             f"🏷️ Username: {username}\n"
             f"📞 Phone: {context.user_data.get('tutor_phone')}\n"
@@ -515,20 +491,15 @@ async def tutor_id_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📚 Subject: {context.user_data.get('tutor_subject')}\n"
             f"🏫 Grade: {context.user_data.get('tutor_grade_cat')} - {context.user_data.get('tutor_grade_specific')}\n"
             f"🏙️ Location: {context.user_data.get('tutor_city')} ({context.user_data.get('tutor_specific_loc')})\n"
-            f"📁 [Secure Drive PDF Link ({pdf_file_name})]({drive_link})\n"
+            f"📁 [Secure Drive ID Link ({file_name})]({drive_link})\n"
             f"📐 Sharpness: `{sharpness}`"
         )
         kb = [[InlineKeyboardButton("✅ Approve", callback_data=f"app_tutor_{session_key}"), InlineKeyboardButton("❌ Reject", callback_data=f"rej_tutor_{session_key}")]]
         await context.bot.send_photo(chat_id=admin_chat_id, photo=photo_file.file_id, caption=review_text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
 
-    try:
-        await status_msg.delete()
-    except Exception:
-        pass
-
     channel_link = os.environ.get("CHANNEL_INVITE_LINK", "https://t.me/HorizonTutorsHub")
     kb = [[InlineKeyboardButton("📢 Join Channel", url=channel_link)], [InlineKeyboardButton("🔙 Main Menu", callback_data="back_home")]]
-    await update.message.reply_text("✅ Registration submitted successfully! Your ID has been converted to PDF and stored securely. We will review it soon.", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+    await update.message.reply_text("✅ Registration submitted successfully! Your ID photo has been securely stored. We will review it soon.", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
     return MENU
 
 # --- Student Request Flow ---

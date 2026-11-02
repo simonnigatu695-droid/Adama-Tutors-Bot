@@ -41,12 +41,13 @@ def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
-# Google Sheets & Drive Setup supporting multiple environment variable keys & fallback paths
+# Google Sheets & Drive Setup looking for "credentials.json" environment variable first
 def get_gspread_client():
     try:
+        # Prioritize environment variable named "credentials.json"
         env_creds = os.environ.get("credentials.json") or os.environ.get("GOOGLE_CREDENTIALS_JSON")
         if env_creds:
-            logger.info("✅ Loading credentials from environment variable")
+            logger.info("✅ Loading credentials from environment variable 'credentials.json'")
             creds_dict = json.loads(env_creds)
             gc = gspread.service_account_from_dict(creds_dict)
             sheet = gc.open("Adama Tutors Database")
@@ -96,13 +97,13 @@ def db_add_client_request(data):
 def sync_upload_to_drive(file_bytes, file_name):
     """Direct, reliable synchronous helper for uploading image files to Google Drive with error logging."""
     try:
+        env_creds = os.environ.get("credentials.json") or os.environ.get("GOOGLE_CREDENTIALS_JSON")
         possible_paths = [
             "/etc/secrets/credentials.json",
             "credentials.json",
             os.path.join(os.getcwd(), "credentials.json")
         ]
         cred_path = next((path for path in possible_paths if os.path.exists(path)), None)
-        env_creds = os.environ.get("credentials.json") or os.environ.get("GOOGLE_CREDENTIALS_JSON")
         
         if env_creds:
             creds_dict = json.loads(env_creds)

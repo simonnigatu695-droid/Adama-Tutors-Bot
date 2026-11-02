@@ -41,32 +41,33 @@ def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
-# Google Sheets & Drive Setup looking for "credentials.json" environment variable first
+# Unified Credentials Loader to prevent dot notation / env variable mismatches
+def get_credentials():
+    env_creds = os.environ.get("GOOGLE_CREDENTIALS_JSON") or os.environ.get("credentials.json")
+    if env_creds:
+        return json.loads(env_creds), None
+
+    possible_paths = [
+        "/etc/secrets/credentials.json",
+        "credentials.json",
+        os.path.join(os.getcwd(), "credentials.json")
+    ]
+    cred_path = next((path for path in possible_paths if os.path.exists(path)), None)
+    return None, cred_path
+
 def get_gspread_client():
     try:
-        # Prioritize environment variable named "credentials.json"
-        env_creds = os.environ.get("credentials.json") or os.environ.get("GOOGLE_CREDENTIALS_JSON")
-        if env_creds:
-            logger.info("✅ Loading credentials from environment variable 'credentials.json'")
-            creds_dict = json.loads(env_creds)
+        creds_dict, cred_path = get_credentials()
+        if creds_dict:
+            logger.info("✅ Loading Google Sheets credentials from environment variable")
             gc = gspread.service_account_from_dict(creds_dict)
-            sheet = gc.open("Adama Tutors Database")
-            logger.info("✅ Successfully opened Google Sheet: Adama Tutors Database")
-            return sheet
-
-        possible_paths = [
-            "/etc/secrets/credentials.json",
-            "credentials.json",
-            os.path.join(os.getcwd(), "credentials.json")
-        ]
-        cred_path = next((path for path in possible_paths if os.path.exists(path)), None)
-        
-        if not cred_path:
-            logger.error("❌ GSPREAD ERROR: credentials.json could not be found anywhere!")
+        elif cred_path:
+            logger.info(f"✅ Loading Google Sheets credentials from file: {cred_path}")
+            gc = gspread.service_account(filename=cred_path)
+        else:
+            logger.error("❌ GSPREAD ERROR: credentials could not be found anywhere!")
             return None
 
-        logger.info(f"✅ Found credentials at: {cred_path}")
-        gc = gspread.service_account(filename=cred_path)
         sheet = gc.open("Adama Tutors Database")
         logger.info("✅ Successfully opened Google Sheet: Adama Tutors Database")
         return sheet
@@ -97,16 +98,8 @@ def db_add_client_request(data):
 def sync_upload_to_drive(file_bytes, file_name):
     """Direct, reliable synchronous helper for uploading image files to Google Drive with error logging."""
     try:
-        env_creds = os.environ.get("credentials.json") or os.environ.get("GOOGLE_CREDENTIALS_JSON")
-        possible_paths = [
-            "/etc/secrets/credentials.json",
-            "credentials.json",
-            os.path.join(os.getcwd(), "credentials.json")
-        ]
-        cred_path = next((path for path in possible_paths if os.path.exists(path)), None)
-        
-        if env_creds:
-            creds_dict = json.loads(env_creds)
+        creds_dict, cred_path = get_credentials()
+        if creds_dict:
             creds = service_account.Credentials.from_service_account_info(
                 creds_dict, scopes=['https://www.googleapis.com/auth/drive']
             )

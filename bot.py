@@ -24,7 +24,7 @@ from telegram.ext import (
     filters,
 )
 
-# Enable logging
+# Enable detailed logging
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
@@ -41,7 +41,7 @@ def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
-# Google Sheets Setup supporting multiple environment variable keys & fallback paths
+# Google Sheets & Drive Setup supporting multiple environment variable keys & fallback paths
 def get_gspread_client():
     try:
         env_creds = os.environ.get("credentials.json") or os.environ.get("GOOGLE_CREDENTIALS_JSON")
@@ -94,7 +94,7 @@ def db_add_client_request(data):
             logger.error(f"❌ FAILED to append to 'Client_Requests' tab: {str(e)}")
 
 def sync_upload_to_drive(file_bytes, file_name):
-    """Direct, reliable synchronous helper for uploading image files to Google Drive."""
+    """Direct, reliable synchronous helper for uploading image files to Google Drive with error logging."""
     try:
         possible_paths = [
             "/etc/secrets/credentials.json",
@@ -114,7 +114,7 @@ def sync_upload_to_drive(file_bytes, file_name):
                 cred_path, scopes=['https://www.googleapis.com/auth/drive']
             )
         else:
-            logger.error("❌ Drive Upload Error: No credentials found.")
+            logger.error("❌ Drive Upload Error: No credentials found for Google Drive.")
             return None
 
         service = build('drive', 'v3', credentials=creds)
@@ -132,10 +132,10 @@ def sync_upload_to_drive(file_bytes, file_name):
             fields='id, webViewLink'
         ).execute()
         
-        logger.info(f"✅ Successfully uploaded {file_name} to Google Drive")
+        logger.info(f"✅ Successfully uploaded {file_name} to Google Drive. File ID: {file.get('id')}")
         return file.get('webViewLink')
     except Exception as e:
-        logger.error(f"❌ Failed to upload to Google Drive: {str(e)}")
+        logger.error(f"❌ CRITICAL GOOGLE DRIVE UPLOAD EXCEPTION: {str(e)}")
         return None
 
 # Conversation States
@@ -457,49 +457,62 @@ async def tutor_id_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Please upload an image file of your ID.")
         return TUTOR_ID
 
-    photo_file = await update.message.photo[-1].get_file()
-    file_bytes = await photo_file.download_as_bytearray()
+    logger.info("📥 [ID UPLOAD] Received ID photo from user. Starting background processing...")
+
+    try:
+        photo_file = await update.message.photo[-1].get_file()
+        file_bytes = await photo_file.download_as_bytearray()
+        
+        user = update.effective_user
+        full_name = context.user_data.get('tutor_name', 'Tutor')
+        safe_name = full_name.replace(" ", "_")
+        username = f"@{user.username}" if user.username else f"id_{user.id}"
+        file_name = f"{safe_name}_{username}.jpg"
+
+        logger.info(f"🚀 [ID UPLOAD] Uploading {file_name} to Google Drive folder...")
+        drive_link = await asyncio.to_thread(sync_upload_to_drive, file_bytes, file_name)
+        context.user_data["tutor_drive_link"] = drive_link or "N/A"
+        context.user_data["tutor_username"] = username
+        context.user_data["telegram_id"] = user.id
+
+        # Compute sharpness score via OpenCV
+        nparr = np.frombuffer(file_bytes, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE)
+        sharpness = round(cv2.Laplacian(img, cv2.CV_64F).var(), 2) if img is not None else 0.0
+
+        session_key = f"pending_tutor_{user.id}_{int(datetime.now().timestamp())}"
+        context.bot_data[session_key] = context.user_data.copy()
+
+        admin_chat_id = os.environ.get("ADMIN_CHAT_ID")
+        if admin_chat_id:
+            review_text = (
+                f"🔔 **New Tutor Review**\n\n"
+                f"👤 Name: {full_name}\n"
+                f"🏷️ Username: {username}\n"
+                f"📞 Phone: {context.user_data.get('tutor_phone')}\n"
+                f"⚧️ Gender: {context.user_data.get('tutor_gender')}\n"
+                f"📚 Subject: {context.user_data.get('tutor_subject')}\n"
+                f"🏫 Grade: {context.user_data.get('tutor_grade_cat')} - {context.user_data.get('tutor_grade_specific')}\n"
+                f"🏙️ Location: {context.user_data.get('tutor_city')} ({context.user_data.get('tutor_specific_loc')})\n"
+                f"📁 [Secure Drive ID Link ({file_name})]({drive_link})\n"
+                f"📐 Sharpness: `{sharpness}`"
+            )
+            kb = [[InlineKeyboardButton("✅ Approve", callback_data=f"app_tutor_{session_key}"), InlineKeyboardButton("❌ Reject", callback_data=f"rej_tutor_{session_key}")]]
+            try:
+                await context.bot.send_photo(chat_id=admin_chat_id, photo=photo_file.file_id, caption=review_text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+                logger.info("✅ [ID UPLOAD] Admin review notification sent successfully.")
+            except Exception as admin_err:
+                logger.error(f"❌ [ID UPLOAD] Failed to send admin review photo: {admin_err}")
+
+        channel_link = os.environ.get("CHANNEL_INVITE_LINK", "https://t.me/HorizonTutorsHub")
+        kb = [[InlineKeyboardButton("📢 Join Channel", url=channel_link)], [InlineKeyboardButton("🔙 Main Menu", callback_data="back_home")]]
+        await update.message.reply_text("✅ Registration submitted successfully! Your ID photo has been securely stored. We will review it soon.", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+        logger.info("🎉 [ID UPLOAD] Tutor registration successfully completed and confirmed to user.")
     
-    user = update.effective_user
-    full_name = context.user_data.get('tutor_name', 'Tutor')
-    safe_name = full_name.replace(" ", "_")
-    username = f"@{user.username}" if user.username else f"id_{user.id}"
-    file_name = f"{safe_name}_{username}.jpg"
-
-    # Upload directly and asynchronously to Google Drive without freezing
-    drive_link = await asyncio.to_thread(sync_upload_to_drive, file_bytes, file_name)
-    context.user_data["tutor_drive_link"] = drive_link or "N/A"
-    context.user_data["tutor_username"] = username
-    context.user_data["telegram_id"] = user.id
-
-    # Compute sharpness score via OpenCV
-    nparr = np.frombuffer(file_bytes, np.uint8)
-    img = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE)
-    sharpness = round(cv2.Laplacian(img, cv2.CV_64F).var(), 2) if img is not None else 0.0
-
-    session_key = f"pending_tutor_{user.id}_{int(datetime.now().timestamp())}"
-    context.bot_data[session_key] = context.user_data.copy()
-
-    admin_chat_id = os.environ.get("ADMIN_CHAT_ID")
-    if admin_chat_id:
-        review_text = (
-            f"🔔 **New Tutor Review**\n\n"
-            f"👤 Name: {full_name}\n"
-            f"🏷️ Username: {username}\n"
-            f"📞 Phone: {context.user_data.get('tutor_phone')}\n"
-            f"⚧️ Gender: {context.user_data.get('tutor_gender')}\n"
-            f"📚 Subject: {context.user_data.get('tutor_subject')}\n"
-            f"🏫 Grade: {context.user_data.get('tutor_grade_cat')} - {context.user_data.get('tutor_grade_specific')}\n"
-            f"🏙️ Location: {context.user_data.get('tutor_city')} ({context.user_data.get('tutor_specific_loc')})\n"
-            f"📁 [Secure Drive ID Link ({file_name})]({drive_link})\n"
-            f"📐 Sharpness: `{sharpness}`"
-        )
-        kb = [[InlineKeyboardButton("✅ Approve", callback_data=f"app_tutor_{session_key}"), InlineKeyboardButton("❌ Reject", callback_data=f"rej_tutor_{session_key}")]]
-        await context.bot.send_photo(chat_id=admin_chat_id, photo=photo_file.file_id, caption=review_text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
-
-    channel_link = os.environ.get("CHANNEL_INVITE_LINK", "https://t.me/HorizonTutorsHub")
-    kb = [[InlineKeyboardButton("📢 Join Channel", url=channel_link)], [InlineKeyboardButton("🔙 Main Menu", callback_data="back_home")]]
-    await update.message.reply_text("✅ Registration submitted successfully! Your ID photo has been securely stored. We will review it soon.", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"❌ CRITICAL EXCEPTION in tutor_id_received: {str(e)}")
+        await update.message.reply_text("⚠️ An error occurred while processing your upload. Please try again or type /start to restart.")
+    
     return MENU
 
 # --- Student Request Flow ---

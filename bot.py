@@ -13,7 +13,7 @@ import gspread
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
-from PIL import Image
+from PIL import Image, ImageOps
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, BotCommand
 from telegram.ext import (
     Application,
@@ -95,13 +95,14 @@ def db_add_client_request(data):
             logger.error(f"❌ FAILED to append to 'Client_Requests' tab: {str(e)}")
 
 def convert_image_to_pdf_bytes(file_bytes):
-    """Converts raw image bytes into a clean PDF byte stream using Pillow."""
+    """Converts raw image bytes into a clean PDF byte stream using Pillow with EXIF and color normalization."""
     try:
         image = Image.open(io.BytesIO(file_bytes))
-        if image.mode == 'RGBA':
+        image = ImageOps.exif_transpose(image) # Fixes sideways/rotated phone photos automatically
+        if image.mode in ('RGBA', 'P', 'LA'):
             image = image.convert('RGB')
         pdf_buffer = io.BytesIO()
-        image.save(pdf_buffer, format='PDF')
+        image.save(pdf_buffer, format='PDF', quality=90)
         pdf_buffer.seek(0)
         return pdf_buffer.getvalue()
     except Exception as e:
@@ -473,7 +474,7 @@ async def tutor_id_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Please upload an image file of your ID.")
         return TUTOR_ID
 
-    await update.message.reply_text("⏳ Processing and converting your ID to PDF, please wait...")
+    status_msg = await update.message.reply_text("⏳ Processing and converting your ID to PDF, please wait...")
 
     photo_file = await update.message.photo[-1].get_file()
     file_bytes = await photo_file.download_as_bytearray()
@@ -483,7 +484,7 @@ async def tutor_id_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     safe_name = full_name.replace(" ", "_")
     username = f"@{user.username}" if user.username else f"id_{user.id}"
     
-    # Convert Image to PDF in background thread to prevent thread freezing
+    # Convert Image to PDF in background thread
     pdf_bytes = await asyncio.to_thread(convert_image_to_pdf_bytes, file_bytes)
     pdf_file_name = f"{safe_name}_{username}.pdf" if pdf_bytes else f"{safe_name}_{username}.jpg"
     upload_bytes = pdf_bytes if pdf_bytes else file_bytes
@@ -519,6 +520,11 @@ async def tutor_id_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         kb = [[InlineKeyboardButton("✅ Approve", callback_data=f"app_tutor_{session_key}"), InlineKeyboardButton("❌ Reject", callback_data=f"rej_tutor_{session_key}")]]
         await context.bot.send_photo(chat_id=admin_chat_id, photo=photo_file.file_id, caption=review_text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+
+    try:
+        await status_msg.delete()
+    except Exception:
+        pass
 
     channel_link = os.environ.get("CHANNEL_INVITE_LINK", "https://t.me/HorizonTutorsHub")
     kb = [[InlineKeyboardButton("📢 Join Channel", url=channel_link)], [InlineKeyboardButton("🔙 Main Menu", callback_data="back_home")]]

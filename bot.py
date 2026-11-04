@@ -216,10 +216,10 @@ def service_account_email() -> str:
 
 
 # --------------------------------------------------------------------------- #
-# Google Sheets layer (Aligned with existing sheet headers)
+# Google Sheets layer (Aligned exactly with your Google Sheet columns)
 # --------------------------------------------------------------------------- #
 TUTOR_HEADERS = [
-    "Timestamp", "Tutor Code", "Telegram ID", "Username", "Name", "Phone", "Gender",
+    "Timestamp", "Telegram ID", "Username", "Name", "Phone", "Gender",
     "Subjects", "Grades", "Location", "Qualification", "ID Verification Status",
     "Status", "ID File ID"
 ]
@@ -230,7 +230,7 @@ CLIENT_HEADERS = [
     "Channel Msg ID"
 ]
 TABS = {
-    "Tutors": {"headers": TUTOR_HEADERS, "code": "Tutor Code"},
+    "Tutors": {"headers": TUTOR_HEADERS, "code": "Timestamp"},
     "Client_Requests": {"headers": CLIENT_HEADERS, "code": "Job Code"},
 }
 
@@ -288,7 +288,7 @@ def _read_headers(ws, tab: str) -> list:
 
 
 def append_with_code(tab: str, prefix: str, data: dict):
-    """Atomically generate a unique code and append the row. Returns (code, updated_range)."""
+    """Atomically generate a unique code (or timestamp ID) and append the row. Returns (code, updated_range)."""
     cfg = TABS[tab]
     code_header = cfg["code"]
     with SHEETS_LOCK:
@@ -297,15 +297,21 @@ def append_with_code(tab: str, prefix: str, data: dict):
             headers = _read_headers(ws, tab)
             existing = set(ws.col_values(headers.index(code_header) + 1))
             code = None
-            for attempt in range(60):
-                digits = 4 if attempt < 30 else 5
-                lo, hi = 10 ** (digits - 1), 10 ** digits - 1
-                candidate = f"#{prefix}-{random.randint(lo, hi)}"
-                if candidate not in existing:
-                    code = candidate
-                    break
-            if code is None:
-                raise SheetsError("Could not generate a unique code.")
+            
+            if tab == "Client_Requests":
+                for attempt in range(60):
+                    digits = 4 if attempt < 30 else 5
+                    lo, hi = 10 ** (digits - 1), 10 ** digits - 1
+                    candidate = f"#{prefix}-{random.randint(lo, hi)}"
+                    if candidate not in existing:
+                        code = candidate
+                        break
+                if code is None:
+                    raise SheetsError("Could not generate a unique job code.")
+            else:
+                # For Tutors, the code header is Timestamp, which is naturally unique per registration
+                code = data.get("Timestamp")
+
             row_data = dict(data)
             row_data[code_header] = code
             row = [str(row_data.get(h, "")) for h in headers]
@@ -346,7 +352,6 @@ def set_status(tab: str, row_no: int, status: str):
         try:
             ws = get_worksheet(tab)
             headers = _read_headers(ws, tab)
-            # Find status column ("Status" for Tutors, "Verification" or "Job Status" for Client Requests)
             status_col_name = "Status" if tab == "Tutors" else "Verification"
             if status_col_name not in headers:
                 status_col_name = "Job Status"
@@ -520,11 +525,11 @@ TEXT = {
         "blurry": "⚠️ The photo looks blurry or too small to read. Please retake it in good light, hold steady, and send again.",
         "dl_failed": "Couldn't download that file. Please try sending it again.",
         "processing": "⏳ Processing, please wait…",
-        "tutor_done": "✅ Thank you! Your registration ({code}) was received and is awaiting admin verification.",
+        "tutor_done": "✅ Thank you! Your registration was received and is awaiting admin verification.",
         "save_failed_photo": "❌ Sorry, a technical problem prevented us from saving your registration. Nothing was recorded. Send the photo again to retry, or /cancel.",
         "save_failed_text": "❌ Sorry, a technical problem prevented us from saving your request. Nothing was recorded. Send your budget again to retry, or /cancel.",
-        "tutor_approved": "🎉 Your tutor profile {code} has been verified and approved!",
-        "tutor_rejected": "Unfortunately your registration {code} was not approved. Please contact support or re-register with a clear ID photo.",
+        "tutor_approved": "🎉 Your tutor profile has been verified and approved!",
+        "tutor_rejected": "Unfortunately your registration was not approved. Please contact support or re-register with a clear ID photo.",
         "ask_student_grade": "Which grade is the student in?",
         "ask_c_subject": "Which subject(s) does the student need help with?",
         "ask_req": "Describe your requirements (schedule, days per week, tutor gender preference, etc.):",
@@ -556,11 +561,11 @@ TEXT = {
         "blurry": "⚠️ ፎቶው ደብዛዛ ወይም ለማንበብ በጣም ትንሽ ነው። እባክዎ በጥሩ ብርሃን ቀጥ አድርገው እንደገና አንስተው ይላኩ።",
         "dl_failed": "ፋይሉን ማውረድ አልተቻለም። እባክዎ እንደገና ይላኩ።",
         "processing": "⏳ በማስኬድ ላይ፣ እባክዎ ይጠብቁ…",
-        "tutor_done": "✅ እናመሰግናለን! ምዝገባዎ ({code}) ተቀብለናል፤ የአስተዳዳሪ ማረጋገጫ በመጠበቅ ላይ ነው።",
+        "tutor_done": "✅ እናመሰግናለን! ምዝገባዎ ተቀብለናል፤ የአስተዳዳሪ ማረጋገጫ በመጠበቅ ላይ ነው።",
         "save_failed_photo": "❌ ይቅርታ፣ በቴክኒክ ችግር ምክንያት ምዝገባዎን ማስቀመጥ አልቻልንም። ምንም አልተመዘገበም። ለመድገም ፎቶውን እንደገና ይላኩ ወይም /cancel ይበሉ።",
         "save_failed_text": "❌ ይቅርታ፣ በቴክኒክ ችግር ምክንያት ጥያቄዎን ማስቀመጥ አልቻልንም። ምንም አልተመዘገበም። ለመድገም በጀትዎን እንደገና ይላኩ ወይም /cancel ይበሉ።",
-        "tutor_approved": "🎉 የአስተማሪ መገለጫዎ {code} ተረጋግጦ ጸድቋል!",
-        "tutor_rejected": "ይቅርታ፣ ምዝገባዎ {code} አልጸደቀም። እባክዎ ድጋፍን ያነጋግሩ ወይም በግልጽ የመታወቂያ ፎቶ እንደገና ይመዝገቡ።",
+        "tutor_approved": "🎉 የአስተማሪ መገለጫዎ ተረጋግጦ ጸድቋል!",
+        "tutor_rejected": "ይቅርታ፣ ምዝገባዎ አልጸደቀም። እባክዎ ድጋፍን ያነጋግሩ ወይም በግልጽ የመታወቂያ ፎቶ እንደገና ይመዝገቡ።",
         "ask_student_grade": "ተማሪው ስንተኛ ክፍል ነው?",
         "ask_c_subject": "ተማሪው በየትኛው ትምህርት(ቶች) እገዛ ይፈልጋል?",
         "ask_req": "መስፈርቶችዎን ይግለጹ (የጊዜ ሰሌዳ፣ በሳምንት ስንት ቀን፣ የአስተማሪ ጾታ ምርጫ ወዘተ)፦",
@@ -788,9 +793,9 @@ async def tutor_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return T_ID
 
         # 4) Sheet append matching sheet headers
+        timestamp_str = now_str()
         data = {
-            "Timestamp": now_str(),
-            "Tutor Code": "",
+            "Timestamp": timestamp_str,
             "Telegram ID": user.id,
             "Username": user_tag(user),
             "Name": ud["name"],
@@ -806,6 +811,7 @@ async def tutor_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }
         try:
             code, rng = await asyncio.to_thread(append_with_code, "Tutors", "TUT", data)
+            code = timestamp_str  # Use timestamp as reference code for tutors
         except Exception as e:
             logger.error("TUTOR SAVE FAILED at SHEETS step (ID already on Drive: %s) | user=%s | %s",
                          ud["id_link"], user.id, e, exc_info=True)
@@ -816,7 +822,7 @@ async def tutor_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # 5) Admin notification with Approve / Reject
         caption = (
-            f"🆕 <b>Tutor registration {esc(code)}</b>\n"
+            f"🆕 <b>Tutor registration</b>\n"
             f"👤 {esc(ud['name'])}  |  {esc(ud['gender'])}\n"
             f"📞 {esc(ud['phone'])}\n"
             f"📚 {esc(ud['subject'])}  |  🎓 {esc(ud['grade'])}\n"
@@ -836,12 +842,12 @@ async def tutor_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_document(ADMIN_CHAT_ID, tg_obj.file_id, caption=caption,
                                                 parse_mode=ParseMode.HTML, reply_markup=buttons)
         except Exception:
-            logger.exception("Admin photo notification failed, falling back to text | code=%s", code)
+            logger.exception("Admin photo notification failed, falling back to text")
             sent = await notify_admin(context, caption, parse_mode=ParseMode.HTML, reply_markup=buttons)
             if sent is None:
-                logger.error("ADMIN NEVER NOTIFIED about tutor %s - approve manually in the sheet.", code)
+                logger.error("ADMIN NEVER NOTIFIED about tutor - approve manually in the sheet.")
 
-        await msg.reply_text(tr(context, "tutor_done", code=code))
+        await msg.reply_text(tr(context, "tutor_done"))
         ud.clear()
         return ConversationHandler.END
     finally:

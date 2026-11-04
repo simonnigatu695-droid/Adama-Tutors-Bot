@@ -1,785 +1,1152 @@
-import os
-import logging
-from datetime import datetime
-import random
-import json
-import cv2
-import numpy as np
-import io
+#!/usr/bin/env python3
+"""
+Horizon Tutors Hub - Telegram bot (Adama & Bishoftu, Ethiopia)
+
+Single-file, deploy-ready for Render.
+Backend: Google Sheets ("Adama Tutors Database": tabs Tutors, Client_Requests)
+         + Google Drive (Tutor_Uploads folder) for ID photos.
+
+Required env vars : TELEGRAM_TOKEN, GOOGLE_CREDENTIALS_JSON (or credentials.json),
+                    ADMIN_CHAT_ID, JOB_CHANNEL_ID
+Optional env vars : DRIVE_FOLDER_ID, SPREADSHEET_NAME, SPREADSHEET_ID,
+                    GOOGLE_CREDENTIALS_FILE, BLUR_THRESHOLD, STARTUP_WRITE_TEST,
+                    RENDER_EXTERNAL_URL (auto-set by Render), PORT (auto-set by Render)
+"""
+
 import asyncio
-from flask import Flask
-from threading import Thread
+import base64
+import html
+import io
+import json
+import logging
+import os
+import random
+import re
+import signal
+import sys
+import threading
+import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import cv2
 import gspread
-from google.oauth2 import service_account
+import numpy as np
+import requests
+from flask import Flask
+from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseUpload
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, BotCommand
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
-    CommandHandler,
     CallbackQueryHandler,
+    CommandHandler,
     ContextTypes,
     ConversationHandler,
     MessageHandler,
     filters,
 )
 
-# Enable detailed logging
+# --------------------------------------------------------------------------- #
+# Logging
+# --------------------------------------------------------------------------- #
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+    format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+    level=logging.INFO,
+    stream=sys.stdout,
 )
-logger = logging.getLogger(__name__)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("werkzeug").setLevel(logging.WARNING)
+logging.getLogger("googleapiclient.discovery_cache").setLevel(logging.ERROR)
+logger = logging.getLogger("horizon")
 
-# Flask Keep-Alive Server for Render & Better Stack
-app = Flask('')
+# --------------------------------------------------------------------------- #
+# Configuration
+# --------------------------------------------------------------------------- #
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
+ADMIN_CHAT_ID_RAW = os.environ.get("ADMIN_CHAT_ID", "").strip()
+JOB_CHANNEL_ID_RAW = os.environ.get("JOB_CHANNEL_ID", "").strip()
 
-@app.route('/')
-def home():
-    return "Horizon Tutors Hub Bot is alive and running!"
+DRIVE_FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID", "1TPt6gHg4ff3PQIbj64ZiLUfIi3IZjQkP").strip()
+SPREADSHEET_NAME = os.environ.get("SPREADSHEET_NAME", "Adama Tutors Database").strip()
+SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID", "").strip()  # optional, more reliable than name
+BLUR_THRESHOLD = float(os.environ.get("BLUR_THRESHOLD", "50"))
+MIN_IMAGE_SIDE = 480
+MAX_IMAGE_BYTES = 15 * 1024 * 1024
+STARTUP_WRITE_TEST = os.environ.get("STARTUP_WRITE_TEST", "1") != "0"
 
-def run_flask():
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+ADMIN_CHAT_ID: int = 0           # set in validate_config()
+JOB_CHANNEL_ID = None            # int or "@name", set in validate_config()
 
-# Unified Credentials Loader to prevent dot notation / env variable mismatches
-def get_credentials():
-    env_creds = os.environ.get("GOOGLE_CREDENTIALS_JSON") or os.environ.get("credentials.json")
-    if env_creds:
-        return json.loads(env_creds), None
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
+EAT = timezone(timedelta(hours=3))  # East Africa Time
 
-    possible_paths = [
-        "/etc/secrets/credentials.json",
-        "credentials.json",
-        os.path.join(os.getcwd(), "credentials.json")
-    ]
-    cred_path = next((path for path in possible_paths if os.path.exists(path)), None)
-    return None, cred_path
 
-def get_gspread_client():
+class ConfigError(Exception):
+    pass
+
+
+class SheetsError(Exception):
+    pass
+
+
+class DriveError(Exception):
+    pass
+
+
+def validate_config():
+    """Fail fast with a clear message if required settings are missing."""
+    global ADMIN_CHAT_ID, JOB_CHANNEL_ID
+    missing = []
+    if not TELEGRAM_TOKEN:
+        missing.append("TELEGRAM_TOKEN")
+    if not ADMIN_CHAT_ID_RAW:
+        missing.append("ADMIN_CHAT_ID")
+    if not JOB_CHANNEL_ID_RAW:
+        missing.append("JOB_CHANNEL_ID")
+    if missing:
+        logger.critical("Missing required environment variables: %s", ", ".join(missing))
+        raise SystemExit(1)
     try:
-        creds_dict, cred_path = get_credentials()
-        if creds_dict:
-            logger.info("✅ Loading Google Sheets credentials from environment variable")
-            gc = gspread.service_account_from_dict(creds_dict)
-        elif cred_path:
-            logger.info(f"✅ Loading Google Sheets credentials from file: {cred_path}")
-            gc = gspread.service_account(filename=cred_path)
-        else:
-            logger.error("❌ GSPREAD ERROR: credentials could not be found anywhere!")
-            return None
-
-        sheet = gc.open("Adama Tutors Database")
-        logger.info("✅ Successfully opened Google Sheet: Adama Tutors Database")
-        return sheet
-    except Exception as e:
-        logger.error(f"❌ GSPREAD CONNECTION EXCEPTION: {str(e)}")
-        return None
-
-def db_add_tutor(data):
-    sheet = get_gspread_client()
-    if sheet:
-        try:
-            ws = sheet.worksheet("Tutors")
-            ws.append_row(data)
-            logger.info("🎉 SUCCESS: Tutor row successfully appended to 'Tutors' tab!")
-        except Exception as e:
-            logger.error(f"❌ FAILED to append to 'Tutors' tab: {str(e)}")
-
-def db_add_client_request(data):
-    sheet = get_gspread_client()
-    if sheet:
-        try:
-            ws = sheet.worksheet("Client_Requests")
-            ws.append_row(data)
-            logger.info("🎉 SUCCESS: Request row successfully appended to 'Client_Requests' tab!")
-        except Exception as e:
-            logger.error(f"❌ FAILED to append to 'Client_Requests' tab: {str(e)}")
-
-def sync_upload_to_drive(file_bytes, file_name):
-    """Direct, reliable synchronous helper for uploading image files to Google Drive with error logging."""
-    try:
-        creds_dict, cred_path = get_credentials()
-        if creds_dict:
-            creds = service_account.Credentials.from_service_account_info(
-                creds_dict, scopes=['https://www.googleapis.com/auth/drive']
-            )
-        elif cred_path:
-            creds = service_account.Credentials.from_service_account_file(
-                cred_path, scopes=['https://www.googleapis.com/auth/drive']
-            )
-        else:
-            logger.error("❌ Drive Upload Error: No credentials found for Google Drive.")
-            return None
-
-        service = build('drive', 'v3', credentials=creds)
-        folder_id = "1TPt6gHg4ff3PQIbj64ZiLUfIi3IZjQkP"
-
-        file_metadata = {
-            'name': file_name,
-            'parents': [folder_id]
-        }
-        
-        media = MediaIoBaseUpload(io.BytesIO(file_bytes), mimetype='image/jpeg', resumable=True)
-        file = service.files().create(
-            body=file_metadata,
-            media_body=media,
-            fields='id, webViewLink'
-        ).execute()
-        
-        logger.info(f"✅ Successfully uploaded {file_name} to Google Drive. File ID: {file.get('id')}")
-        return file.get('webViewLink')
-    except Exception as e:
-        logger.error(f"❌ CRITICAL GOOGLE DRIVE UPLOAD EXCEPTION: {str(e)}")
-        return None
-
-# Conversation States
-(
-    LANG, MENU, 
-    TUTOR_NAME, TUTOR_PHONE, TUTOR_GENDER, TUTOR_SUBJECT, TUTOR_GRADE_CAT, TUTOR_GRADE_SPECIFIC, TUTOR_CITY, TUTOR_SPECIFIC_LOC, TUTOR_ID,
-    REQ_NAME, REQ_PHONE, REQ_SUBJECT, REQ_GRADE_CAT, REQ_GRADE_SPECIFIC, REQ_CITY, REQ_SPECIFIC_LOC, REQ_GENDER_PREF, REQ_BUDGET
-) = range(20)
-
-async def post_init(application: Application):
-    commands = [
-        BotCommand("start", "Start or restart the bot / ቦቱን ያስጀምሩ"),
-        BotCommand("help", "How to use this bot"),
-        BotCommand("broadcast", "Post vacancy with job ID to channel"),
-        BotCommand("catchup", "View recent pending applications"),
-        BotCommand("stats", "View live agency stats"),
-        BotCommand("search", "Search approved tutors by keyword"),
-        BotCommand("testblur", "Check sharpness score of an ID photo"),
-        BotCommand("cancel", "Cancel current operation / ሂደቱን ይሰርዙ"),
-    ]
-    await application.bot.set_my_commands(commands)
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if context.args:
-        arg = context.args[0]
-        if arg.startswith("apply_"):
-            job_code = arg.replace("apply_", "")
-            context.user_data["target_job"] = job_code
-            await update.message.reply_text(
-                f"🎯 **Applying for Job #{job_code}**\n"
-                f"Welcome! To apply for this vacancy, please register as a tutor or contact our admin with your Job Code.",
-                parse_mode="Markdown"
-            )
-
-    keyboard = [
-        [
-            InlineKeyboardButton("English 🇬🇧", callback_data="lang_en"),
-            InlineKeyboardButton("አማርኛ 🇪🇹", callback_data="lang_am"),
-        ]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    text = (
-        "🌟 **Welcome to Horizon Tutors Hub** 🌟\n"
-        "Connecting qualified tutors with students in Adama and Bishoftu.\n\n"
-        "Please choose your preferred language:"
-    )
-    
-    if update.callback_query:
-        await update.callback_query.answer()
-        await update.callback_query.message.edit_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+        ADMIN_CHAT_ID = int(ADMIN_CHAT_ID_RAW)
+    except ValueError:
+        logger.critical("ADMIN_CHAT_ID must be a number (got %r). Send /myid to the bot to find yours.",
+                        ADMIN_CHAT_ID_RAW)
+        raise SystemExit(1)
+    raw = JOB_CHANNEL_ID_RAW
+    if re.fullmatch(r"-?\d+", raw):
+        JOB_CHANNEL_ID = int(raw)
     else:
-        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+        JOB_CHANNEL_ID = raw if raw.startswith("@") else "@" + raw
+    logger.info("Config OK | admin=%s | channel=%s | drive_folder=%s | sheet=%s",
+                ADMIN_CHAT_ID, JOB_CHANNEL_ID, DRIVE_FOLDER_ID, SPREADSHEET_ID or SPREADSHEET_NAME)
+
+
+# --------------------------------------------------------------------------- #
+# Google credentials (env JSON string -> base64 -> file fallbacks)
+# --------------------------------------------------------------------------- #
+def _parse_json_blob(raw: str, source: str) -> dict:
+    raw = raw.strip()
+    if len(raw) >= 2 and raw[0] == "'" and raw[-1] == "'":
+        raw = raw[1:-1].strip()
+    if not raw.startswith("{"):
+        try:
+            raw = base64.b64decode(raw, validate=True).decode("utf-8")
+        except Exception:
+            raise ConfigError(f"{source} is neither JSON nor base64-encoded JSON "
+                              f"(first chars: {raw[:12]!r}...).")
+    try:
+        # strict=False tolerates literal newlines inside the private_key string
+        return json.loads(raw, strict=False)
+    except json.JSONDecodeError as e:
+        raise ConfigError(f"{source} is not valid JSON: {e.msg} (line {e.lineno}, col {e.colno}). "
+                          "Paste the ENTIRE service-account file contents without extra quotes.")
+
+
+def load_service_account_info() -> dict:
+    tried = []
+    info = None
+    source = ""
+
+    raw = os.environ.get("GOOGLE_CREDENTIALS_JSON", "").strip()
+    if raw:
+        if not raw.startswith("{") and len(raw) < 512 and Path(raw).is_file():
+            source = f"file {raw} (from GOOGLE_CREDENTIALS_JSON)"
+            info = _parse_json_blob(Path(raw).read_text(encoding="utf-8"), source)
+        else:
+            source = "env GOOGLE_CREDENTIALS_JSON"
+            info = _parse_json_blob(raw, source)
+    else:
+        tried.append("env GOOGLE_CREDENTIALS_JSON (not set)")
+        candidates = [
+            os.environ.get("GOOGLE_CREDENTIALS_FILE", "").strip() or None,
+            str(Path(__file__).resolve().with_name("credentials.json")),
+            str(Path.cwd() / "credentials.json"),
+            "/etc/secrets/credentials.json",  # Render "Secret Files" location
+        ]
+        for cand in candidates:
+            if not cand:
+                continue
+            if Path(cand).is_file():
+                source = f"file {cand}"
+                info = _parse_json_blob(Path(cand).read_text(encoding="utf-8"), source)
+                break
+            tried.append(f"{cand} (not found)")
+
+    if info is None:
+        raise ConfigError("No Google credentials found. Tried: " + "; ".join(tried))
+
+    if not isinstance(info, dict):
+        raise ConfigError(f"{source}: expected a JSON object.")
+    required = ["type", "client_email", "private_key"]
+    absent = [k for k in required if not info.get(k)]
+    if absent:
+        raise ConfigError(f"{source}: missing keys {absent}. Use a SERVICE ACCOUNT key file.")
+    if info["type"] != "service_account":
+        raise ConfigError(f"{source}: type is {info['type']!r}, expected 'service_account'.")
+    info["private_key"] = info["private_key"].replace("\\n", "\n")
+    logger.info("Google credentials loaded from %s | service account: %s", source, info["client_email"])
+    return info
+
+
+_creds = None
+_creds_lock = threading.Lock()
+
+
+def get_credentials() -> Credentials:
+    global _creds
+    with _creds_lock:
+        if _creds is None:
+            info = load_service_account_info()
+            try:
+                _creds = Credentials.from_service_account_info(info, scopes=SCOPES)
+            except Exception as e:
+                raise ConfigError(f"Service-account key rejected by google-auth: {e}")
+        return _creds
+
+
+def service_account_email() -> str:
+    return get_credentials().service_account_email
+
+
+# --------------------------------------------------------------------------- #
+# Google Sheets layer
+# --------------------------------------------------------------------------- #
+TUTOR_HEADERS = ["Timestamp", "Tutor Code", "Telegram ID", "Username", "Full Name", "Phone", "Gender",
+                 "Subject", "Grade Level", "City", "Neighborhood", "ID Photo Link", "Language", "Status"]
+CLIENT_HEADERS = ["Timestamp", "Job Code", "Telegram ID", "Username", "Client Name", "Phone", "Student Grade",
+                  "Subject", "City", "Neighborhood", "Requirements", "Budget", "Language", "Status"]
+TABS = {
+    "Tutors": {"headers": TUTOR_HEADERS, "code": "Tutor Code"},
+    "Client_Requests": {"headers": CLIENT_HEADERS, "code": "Job Code"},
+}
+
+SHEETS_LOCK = threading.RLock()
+_spreadsheet = None
+
+
+def _sheets_hint(err: str) -> str:
+    low = err.lower()
+    if "has not been used" in low or "accessnotconfigured" in low or "service_disabled" in low:
+        return " HINT: enable the Google Sheets API and Google Drive API in your Google Cloud project."
+    if "permission" in low or "403" in low:
+        return f" HINT: share the Google Sheet with {service_account_email()} as Editor."
+    return ""
+
+
+def get_spreadsheet():
+    global _spreadsheet
+    with SHEETS_LOCK:
+        if _spreadsheet is None:
+            gc = gspread.authorize(get_credentials())
+            try:
+                _spreadsheet = gc.open_by_key(SPREADSHEET_ID) if SPREADSHEET_ID else gc.open(SPREADSHEET_NAME)
+            except gspread.SpreadsheetNotFound:
+                raise SheetsError(
+                    f"Spreadsheet '{SPREADSHEET_ID or SPREADSHEET_NAME}' not found or not shared. "
+                    f"Share it with {service_account_email()} as Editor (check the exact name).")
+            except Exception as e:
+                raise SheetsError(f"Could not open spreadsheet: {e!r}." + _sheets_hint(str(e)))
+        return _spreadsheet
+
+
+def get_worksheet(tab: str):
+    ss = get_spreadsheet()
+    try:
+        return ss.worksheet(tab)
+    except gspread.WorksheetNotFound:
+        found = [w.title for w in ss.worksheets()]
+        raise SheetsError(f"Tab '{tab}' not found. Tabs present: {found}. Tab names are case-sensitive.")
+
+
+def _reset_sheet_connection():
+    global _spreadsheet
+    _spreadsheet = None
+
+
+def _read_headers(ws, tab: str) -> list:
+    headers = ws.row_values(1)
+    if not headers:
+        raise SheetsError(f"Tab '{tab}' has an empty header row (row 1).")
+    missing = [h for h in TABS[tab]["headers"] if h not in headers]
+    if missing:
+        raise SheetsError(f"Tab '{tab}' is missing header columns: {missing}. Found: {headers}")
+    return headers
+
+
+def append_with_code(tab: str, prefix: str, data: dict):
+    """Atomically generate a unique code and append the row. Returns (code, updated_range)."""
+    cfg = TABS[tab]
+    code_header = cfg["code"]
+    with SHEETS_LOCK:
+        try:
+            ws = get_worksheet(tab)
+            headers = _read_headers(ws, tab)
+            existing = set(ws.col_values(headers.index(code_header) + 1))
+            code = None
+            for attempt in range(60):
+                digits = 4 if attempt < 30 else 5
+                lo, hi = 10 ** (digits - 1), 10 ** digits - 1
+                candidate = f"#{prefix}-{random.randint(lo, hi)}"
+                if candidate not in existing:
+                    code = candidate
+                    break
+            if code is None:
+                raise SheetsError("Could not generate a unique code.")
+            row_data = dict(data)
+            row_data[code_header] = code
+            row = [str(row_data.get(h, "")) for h in headers]
+            resp = ws.append_row(row, value_input_option="RAW")
+            updated = (resp or {}).get("updates", {}).get("updatedRange", "?")
+            logger.info("Sheets append OK | tab=%s | code=%s | range=%s", tab, code, updated)
+            return code, updated
+        except SheetsError:
+            raise
+        except Exception as e:
+            _reset_sheet_connection()
+            raise SheetsError(f"Append to '{tab}' failed: {e!r}." + _sheets_hint(str(e)))
+
+
+def find_record(tab: str, code: str):
+    """Returns (row_number, {header: value}) or None."""
+    cfg = TABS[tab]
+    with SHEETS_LOCK:
+        try:
+            ws = get_worksheet(tab)
+            headers = _read_headers(ws, tab)
+            codes = ws.col_values(headers.index(cfg["code"]) + 1)
+            if code not in codes:
+                return None
+            row_no = codes.index(code) + 1
+            values = ws.row_values(row_no)
+            values += [""] * (len(headers) - len(values))
+            return row_no, dict(zip(headers, values))
+        except SheetsError:
+            raise
+        except Exception as e:
+            _reset_sheet_connection()
+            raise SheetsError(f"Lookup in '{tab}' failed: {e!r}." + _sheets_hint(str(e)))
+
+
+def set_status(tab: str, row_no: int, status: str):
+    with SHEETS_LOCK:
+        try:
+            ws = get_worksheet(tab)
+            headers = _read_headers(ws, tab)
+            ws.update_cell(row_no, headers.index("Status") + 1, status)
+            logger.info("Sheets status updated | tab=%s | row=%s | status=%s", tab, row_no, status)
+        except SheetsError:
+            raise
+        except Exception as e:
+            _reset_sheet_connection()
+            raise SheetsError(f"Status update in '{tab}' failed: {e!r}." + _sheets_hint(str(e)))
+
+
+# --------------------------------------------------------------------------- #
+# Google Drive layer
+# --------------------------------------------------------------------------- #
+def _drive_service():
+    return build("drive", "v3", credentials=get_credentials(), cache_discovery=False)
+
+
+def _http_error_info(e: HttpError):
+    try:
+        body = json.loads(e.content.decode("utf-8"))
+        err = body.get("error", {})
+        reasons = [x.get("reason") for x in err.get("errors", [])]
+        return e.resp.status, reasons, err.get("message", "")
+    except Exception:
+        return getattr(e.resp, "status", "?"), [], str(e)
+
+
+def _drive_hint(status, reasons, message) -> str:
+    email = service_account_email()
+    if "storageQuotaExceeded" in reasons or "storage quota" in message.lower():
+        return ("Service accounts have NO storage quota in a normal 'My Drive' folder. Move the "
+                f"Tutor_Uploads folder into a SHARED DRIVE and add {email} as Content manager.")
+    if status == 404:
+        return f"Folder not found or not shared with {email}. Check DRIVE_FOLDER_ID and sharing."
+    if "accessNotConfigured" in reasons or "SERVICE_DISABLED" in message:
+        return "The Google Drive API is not enabled in your Google Cloud project."
+    if status == 403:
+        return f"{email} lacks permission. Give it Editor (My Drive folder) or Content manager (Shared Drive)."
+    return ""
+
+
+def upload_to_drive(data: bytes, filename: str, mimetype: str) -> dict:
+    try:
+        svc = _drive_service()
+        media = MediaIoBaseUpload(io.BytesIO(data), mimetype=mimetype, resumable=False)
+        meta = {"name": filename, "parents": [DRIVE_FOLDER_ID]}
+        f = svc.files().create(body=meta, media_body=media, fields="id,webViewLink",
+                               supportsAllDrives=True).execute()
+        logger.info("Drive upload OK | name=%s | id=%s", filename, f.get("id"))
+        return f
+    except HttpError as e:
+        status, reasons, message = _http_error_info(e)
+        raise DriveError(f"Drive upload failed: HTTP {status} {reasons} {message} | "
+                         f"{_drive_hint(status, reasons, message)}")
+    except Exception as e:
+        raise DriveError(f"Drive upload failed: {e!r}")
+
+
+# --------------------------------------------------------------------------- #
+# Image sharpness (OpenCV)
+# --------------------------------------------------------------------------- #
+def check_sharpness(data: bytes):
+    """Returns (ok, score, reason). Laplacian variance on a normalized-size grayscale copy."""
+    arr = np.frombuffer(data, np.uint8)
+    img = cv2.imdecode(arr, cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        return False, 0.0, "not_image"
+    h, w = img.shape[:2]
+    if min(h, w) < MIN_IMAGE_SIDE:
+        return False, 0.0, "too_small"
+    longest = max(h, w)
+    if longest > 1024:
+        scale = 1024 / longest
+        img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+    score = float(cv2.Laplacian(img, cv2.CV_64F).var())
+    logger.info("Sharpness score=%.1f (threshold=%.1f) size=%dx%d", score, BLUR_THRESHOLD, w, h)
+    return score >= BLUR_THRESHOLD, score, "blurry" if score < BLUR_THRESHOLD else "ok"
+
+
+# --------------------------------------------------------------------------- #
+# Startup self-checks (Sheets + Drive)
+# --------------------------------------------------------------------------- #
+def run_startup_checks() -> list:
+    problems = []
+
+    try:
+        email = service_account_email()
+    except ConfigError as e:
+        logger.critical("CREDENTIALS PROBLEM: %s", e)
+        return [f"Credentials: {e}"]
+
+    # Sheets
+    try:
+        ss = get_spreadsheet()
+        existing = {w.title for w in ss.worksheets()}
+        for tab, cfg in TABS.items():
+            if tab not in existing:
+                logger.warning("Tab '%s' missing - creating it.", tab)
+                ss.add_worksheet(title=tab, rows=1000, cols=len(cfg["headers"]))
+            ws = ss.worksheet(tab)
+            if not ws.row_values(1):
+                ws.insert_row(cfg["headers"], 1, value_input_option="RAW")
+                logger.warning("Tab '%s' had no header row - wrote default headers.", tab)
+            try:
+                _read_headers(ws, tab)
+            except SheetsError as e:
+                problems.append(str(e))
+        logger.info("Sheets check done. Tabs: %s", sorted(existing | set(TABS)))
+    except Exception as e:
+        _reset_sheet_connection()
+        msg = f"Sheets check failed: {e}" + (_sheets_hint(str(e)) if not isinstance(e, SheetsError) else "")
+        logger.error(msg)
+        problems.append(msg)
+
+    # Drive
+    try:
+        svc = _drive_service()
+        meta = svc.files().get(
+            fileId=DRIVE_FOLDER_ID,
+            fields="id,name,mimeType,driveId,capabilities(canAddChildren)",
+            supportsAllDrives=True).execute()
+        if meta.get("mimeType") != "application/vnd.google-apps.folder":
+            problems.append(f"DRIVE_FOLDER_ID points to a non-folder ({meta.get('mimeType')}).")
+        elif not meta.get("capabilities", {}).get("canAddChildren"):
+            problems.append(f"{email} can see the Drive folder but cannot add files (needs Editor).")
+        elif not meta.get("driveId"):
+            logger.warning("Drive folder '%s' is in a personal My Drive. Uploads by service accounts "
+                           "often fail with storageQuotaExceeded there; a Shared Drive is recommended.",
+                           meta.get("name"))
+        if STARTUP_WRITE_TEST and not problems:
+            test = upload_to_drive(b"horizon healthcheck", "_horizon_healthcheck.txt", "text/plain")
+            svc.files().delete(fileId=test["id"], supportsAllDrives=True).execute()
+            logger.info("Drive write test OK (test file created and removed).")
+        logger.info("Drive check done. Folder: %s", meta.get("name"))
+    except HttpError as e:
+        status, reasons, message = _http_error_info(e)
+        msg = f"Drive check failed: HTTP {status} {reasons} {message} | {_drive_hint(status, reasons, message)}"
+        logger.error(msg)
+        problems.append(msg)
+    except Exception as e:
+        msg = f"Drive check failed: {e}"
+        logger.error(msg)
+        problems.append(msg)
+
+    return problems
+
+
+# --------------------------------------------------------------------------- #
+# Texts (English / Amharic)
+# --------------------------------------------------------------------------- #
+TEXT = {
+    "en": {
+        "menu": "Welcome to Horizon Tutors Hub! 🎓\nWe connect students with verified tutors in Adama and Bishoftu.\n\nWhat would you like to do?",
+        "btn_tutor": "👨‍🏫 Register as Tutor",
+        "btn_client": "🔎 Find a Tutor",
+        "ask_name": "Please enter your full name:",
+        "ask_phone": "Enter your phone number (e.g. 0912345678):",
+        "bad_phone": "That doesn't look like a valid Ethiopian phone number. Try again (e.g. 0912345678 or +251912345678).",
+        "ask_gender": "Select your gender:",
+        "male": "Male", "female": "Female",
+        "ask_subject": "Which subject(s) do you teach?",
+        "ask_grade": "Which grade level(s) can you teach? (e.g. Grade 9-12)",
+        "ask_city": "Select your city:",
+        "adama": "Adama", "bishoftu": "Bishoftu",
+        "ask_hood": "Enter your neighborhood / area:",
+        "ask_id": "Please send a clear photo of your National ID (front side).\nTip: send it as a File (no compression) for best quality.",
+        "not_image": "Please send an image (photo) of your ID.",
+        "too_large": "That file is too large. Please send an image under 15 MB.",
+        "blurry": "⚠️ The photo looks blurry or too small to read. Please retake it in good light, hold steady, and send again.",
+        "dl_failed": "Couldn't download that file. Please try sending it again.",
+        "processing": "⏳ Processing, please wait…",
+        "tutor_done": "✅ Thank you! Your registration ({code}) was received and is awaiting admin verification.",
+        "save_failed_photo": "❌ Sorry, a technical problem prevented us from saving your registration. Nothing was recorded. Send the photo again to retry, or /cancel.",
+        "save_failed_text": "❌ Sorry, a technical problem prevented us from saving your request. Nothing was recorded. Send your budget again to retry, or /cancel.",
+        "tutor_approved": "🎉 Your tutor profile {code} has been verified and approved!",
+        "tutor_rejected": "Unfortunately your registration {code} was not approved. Please contact support or re-register with a clear ID photo.",
+        "ask_student_grade": "Which grade is the student in?",
+        "ask_c_subject": "Which subject(s) does the student need help with?",
+        "ask_req": "Describe your requirements (schedule, days per week, tutor gender preference, etc.):",
+        "ask_budget": "What is your budget per month (ETB)?",
+        "client_done": "✅ Your request {code} was received and is awaiting approval. Once approved we'll share it with our tutors.",
+        "client_approved": "🎉 Your request {code} is approved and has been shared with our tutors. We'll connect you soon.",
+        "client_rejected": "Your request {code} was not approved. Please contact support for details.",
+        "cancelled": "Cancelled. Send /start to begin again.",
+        "hint": "Please send /start to begin.",
+        "error": "Something went wrong. Please try again with /start.",
+    },
+    "am": {
+        "menu": "እንኳን ወደ ሆራይዘን ቱተርስ ሃብ በደህና መጡ! 🎓\nበአዳማ እና ቢሾፍቱ ተማሪዎችን ከተረጋገጡ አስተማሪዎች ጋር እናገናኛለን።\n\nምን ማድረግ ይፈልጋሉ?",
+        "btn_tutor": "👨‍🏫 እንደ አስተማሪ ይመዝገቡ",
+        "btn_client": "🔎 አስተማሪ ይፈልጉ",
+        "ask_name": "እባክዎ ሙሉ ስምዎን ያስገቡ፦",
+        "ask_phone": "ስልክ ቁጥርዎን ያስገቡ (ለምሳሌ 0912345678)፦",
+        "bad_phone": "ትክክለኛ የኢትዮጵያ ስልክ ቁጥር አይመስልም። እንደገና ይሞክሩ (ለምሳሌ 0912345678 ወይም +251912345678)።",
+        "ask_gender": "ጾታዎን ይምረጡ፦",
+        "male": "ወንድ", "female": "ሴት",
+        "ask_subject": "የሚያስተምሩት ትምህርት(ቶች) ምንድን ነው?",
+        "ask_grade": "የትኛውን የክፍል ደረጃ ማስተማር ይችላሉ? (ለምሳሌ ከ9-12ኛ ክፍል)",
+        "ask_city": "ከተማዎን ይምረጡ፦",
+        "adama": "አዳማ", "bishoftu": "ቢሾፍቱ",
+        "ask_hood": "ሰፈርዎን / አካባቢዎን ያስገቡ፦",
+        "ask_id": "እባክዎ የብሔራዊ መታወቂያዎን (የፊት ገጽ) ግልጽ ፎቶ ይላኩ።\nለተሻለ ጥራት እንደ ፋይል (File) ይላኩ።",
+        "not_image": "እባክዎ የመታወቂያዎን ምስል (ፎቶ) ይላኩ።",
+        "too_large": "ፋይሉ በጣም ትልቅ ነው። እባክዎ ከ15 ሜጋባይት በታች የሆነ ምስል ይላኩ።",
+        "blurry": "⚠️ ፎቶው ደብዛዛ ወይም ለማንበብ በጣም ትንሽ ነው። እባክዎ በጥሩ ብርሃን ቀጥ አድርገው እንደገና አንስተው ይላኩ።",
+        "dl_failed": "ፋይሉን ማውረድ አልተቻለም። እባክዎ እንደገና ይላኩ።",
+        "processing": "⏳ በማስኬድ ላይ፣ እባክዎ ይጠብቁ…",
+        "tutor_done": "✅ እናመሰግናለን! ምዝገባዎ ({code}) ተቀብለናል፤ የአስተዳዳሪ ማረጋገጫ በመጠበቅ ላይ ነው።",
+        "save_failed_photo": "❌ ይቅርታ፣ በቴክኒክ ችግር ምክንያት ምዝገባዎን ማስቀመጥ አልቻልንም። ምንም አልተመዘገበም። ለመድገም ፎቶውን እንደገና ይላኩ ወይም /cancel ይበሉ።",
+        "save_failed_text": "❌ ይቅርታ፣ በቴክኒክ ችግር ምክንያት ጥያቄዎን ማስቀመጥ አልቻልንም። ምንም አልተመዘገበም። ለመድገም በጀትዎን እንደገና ይላኩ ወይም /cancel ይበሉ።",
+        "tutor_approved": "🎉 የአስተማሪ መገለጫዎ {code} ተረጋግጦ ጸድቋል!",
+        "tutor_rejected": "ይቅርታ፣ ምዝገባዎ {code} አልጸደቀም። እባክዎ ድጋፍን ያነጋግሩ ወይም በግልጽ የመታወቂያ ፎቶ እንደገና ይመዝገቡ።",
+        "ask_student_grade": "ተማሪው ስንተኛ ክፍል ነው?",
+        "ask_c_subject": "ተማሪው በየትኛው ትምህርት(ቶች) እገዛ ይፈልጋል?",
+        "ask_req": "መስፈርቶችዎን ይግለጹ (የጊዜ ሰሌዳ፣ በሳምንት ስንት ቀን፣ የአስተማሪ ጾታ ምርጫ ወዘተ)፦",
+        "ask_budget": "ወርሃዊ በጀትዎ ስንት ነው (በብር)?",
+        "client_done": "✅ ጥያቄዎ ({code}) ተቀብለናል፤ ማረጋገጫ በመጠበቅ ላይ ነው። ከጸደቀ ለአስተማሪዎቻችን እናሳውቃለን።",
+        "client_approved": "🎉 ጥያቄዎ {code} ጸድቆ ለአስተማሪዎቻችን ተሰራጭቷል። በቅርቡ እናገናኝዎታለን።",
+        "client_rejected": "ጥያቄዎ {code} አልጸደቀም። ለዝርዝር ድጋፍን ያነጋግሩ።",
+        "cancelled": "ተሰርዟል። እንደገና ለመጀመር /start ይላኩ።",
+        "hint": "ለመጀመር እባክዎ /start ይላኩ።",
+        "error": "የሆነ ችግር ተፈጥሯል። እባክዎ በ /start እንደገና ይሞክሩ።",
+    },
+}
+
+
+def lang_of(context) -> str:
+    return context.user_data.get("lang", "en")
+
+
+def tr(context, key: str, **kw) -> str:
+    s = TEXT[lang_of(context)][key]
+    return s.format(**kw) if kw else s
+
+
+def tr_lang(lang: str, key: str, **kw) -> str:
+    lang = lang if lang in TEXT else "en"
+    s = TEXT[lang][key]
+    return s.format(**kw) if kw else s
+
+
+# --------------------------------------------------------------------------- #
+# Helpers
+# --------------------------------------------------------------------------- #
+def esc(v) -> str:
+    return html.escape(str(v), quote=False)
+
+
+def clean(text: str, maxlen: int) -> str:
+    return re.sub(r"\s+", " ", text or "").strip()[:maxlen]
+
+
+def normalize_phone(s: str):
+    s = re.sub(r"[\s\-().]", "", s or "")
+    m = re.fullmatch(r"(?:\+?251|0)?([79]\d{8})", s)
+    return "+251" + m.group(1) if m else None
+
+
+def now_str() -> str:
+    return datetime.now(EAT).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def user_tag(user) -> str:
+    return f"@{user.username}" if user.username else ""
+
+
+def mention(user) -> str:
+    name = esc(user.full_name or "user")
+    return f'<a href="tg://user?id={user.id}">{name}</a>' + (f" ({esc(user_tag(user))})" if user.username else "")
+
+
+def menu_keyboard(context):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(tr(context, "btn_tutor"), callback_data="menu:tutor")],
+        [InlineKeyboardButton(tr(context, "btn_client"), callback_data="menu:client")],
+    ])
+
+
+def gender_keyboard(context):
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(tr(context, "male"), callback_data="gender:Male"),
+        InlineKeyboardButton(tr(context, "female"), callback_data="gender:Female"),
+    ]])
+
+
+def city_keyboard(context):
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(tr(context, "adama"), callback_data="city:Adama"),
+        InlineKeyboardButton(tr(context, "bishoftu"), callback_data="city:Bishoftu"),
+    ]])
+
+
+async def notify_admin(context, text: str, **kwargs):
+    """Send to admin; never raise, but log loudly if it fails."""
+    try:
+        return await context.bot.send_message(ADMIN_CHAT_ID, text, **kwargs)
+    except Exception:
+        logger.exception("ADMIN NOTIFICATION FAILED (check ADMIN_CHAT_ID and that the admin pressed /start). "
+                         "Message was: %s", text[:300])
+        return None
+
+
+# --------------------------------------------------------------------------- #
+# Conversation states
+# --------------------------------------------------------------------------- #
+(LANG, MENU,
+ T_NAME, T_PHONE, T_GENDER, T_SUBJECT, T_GRADE, T_CITY, T_HOOD, T_ID,
+ C_NAME, C_PHONE, C_GRADE, C_SUBJECT, C_CITY, C_HOOD, C_REQ, C_BUDGET) = range(18)
+
+PRIVATE = filters.ChatType.PRIVATE
+TEXT_ONLY = filters.TEXT & ~filters.COMMAND & PRIVATE
+
+
+async def cmd_myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.effective_message.reply_text(
+        f"Chat ID: {update.effective_chat.id}\nYour user ID: {update.effective_user.id}")
+
+
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
+    await update.effective_message.reply_text(
+        "Please choose your language / እባክዎ ቋንቋ ይምረጡ",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("🇬🇧 English", callback_data="lang:en"),
+            InlineKeyboardButton("🇪🇹 አማርኛ", callback_data="lang:am"),
+        ]]))
     return LANG
 
-async def language_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    lang = "en" if query.data == "lang_en" else "am"
-    context.user_data["lang"] = lang
 
-    if lang == "en":
-        text = "Welcome! What would you like to do today?"
-        kb = [
-            [InlineKeyboardButton("👨‍🏫 Register as a Tutor", callback_data="reg_tutor")],
-            [InlineKeyboardButton("📚 Request a Tutor", callback_data="req_tutor")],
-            [InlineKeyboardButton("ℹ️ About Us", callback_data="about")],
-            [InlineKeyboardButton("📞 Contact Support", callback_data="support")],
-            [InlineKeyboardButton("❌ Cancel / Exit", callback_data="cancel_action")],
-        ]
+async def set_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    context.user_data["lang"] = q.data.split(":")[1]
+    await q.message.reply_text(tr(context, "menu"), reply_markup=menu_keyboard(context))
+    return MENU
+
+
+async def menu_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    flow = q.data.split(":")[1]
+    context.user_data["flow"] = flow
+    await q.message.reply_text(tr(context, "ask_name"))
+    return T_NAME if flow == "tutor" else C_NAME
+
+
+async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    lang = lang_of(context)
+    context.user_data.clear()
+    await update.effective_message.reply_text(tr_lang(lang, "cancelled"))
+    return ConversationHandler.END
+
+
+def text_step(state, field, next_state, prompt_key, *, maxlen=120, validator=None,
+              error_key=None, markup_fn=None):
+    async def handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        value = clean(update.message.text, maxlen)
+        if validator:
+            value = validator(value)
+            if value is None:
+                await update.message.reply_text(tr(context, error_key))
+                return state
+        elif not value:
+            return state
+        context.user_data[field] = value
+        await update.message.reply_text(
+            tr(context, prompt_key),
+            reply_markup=markup_fn(context) if markup_fn else None)
+        return next_state
+    return handler
+
+
+def choice_step(field, next_state, prompt_key):
+    async def handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        q = update.callback_query
+        await q.answer()
+        context.user_data[field] = q.data.split(":")[1]
+        await q.message.reply_text(tr(context, prompt_key))
+        return next_state
+    return handler
+
+
+# --------------------------------------------------------------------------- #
+# Tutor flow: final step (ID photo -> Drive -> Sheet -> admin)
+# --------------------------------------------------------------------------- #
+EXT_BY_MIME = {"image/jpeg": "jpg", "image/jpg": "jpg", "image/png": "png",
+               "image/webp": "webp", "image/heic": "heic"}
+
+
+async def tutor_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg, ud, user = update.message, context.user_data, update.effective_user
+    if ud.get("busy"):
+        return T_ID
+
+    if msg.photo:
+        tg_obj, mime, kind = msg.photo[-1], "image/jpeg", "photo"
     else:
-        text = "እንኳን ደህና መጡ! ዛሬ ምን ማድረግ ይፈልጋሉ?"
-        kb = [
-            [InlineKeyboardButton("👨‍🏫 መምህር ሆኖ ለመመዝገብ", callback_data="reg_tutor")],
-            [InlineKeyboardButton("📚 መምህር ማግኘት እፈልጋለሁ", callback_data="req_tutor")],
-            [InlineKeyboardButton("ℹ️ ስለ እኛ", callback_data="about")],
-            [InlineKeyboardButton("📞 የዕርዳታ ማዕከል", callback_data="support")],
-            [InlineKeyboardButton("❌ ሰርዝ / ውጣ", callback_data="cancel_action")],
-        ]
-    
-    await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
-    return MENU
+        tg_obj, mime, kind = msg.document, msg.document.mime_type or "image/jpeg", "document"
+    ext = EXT_BY_MIME.get(mime, "jpg")
 
-async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    lang = context.user_data.get("lang", "en")
+    if tg_obj.file_size and tg_obj.file_size > MAX_IMAGE_BYTES:
+        await msg.reply_text(tr(context, "too_large"))
+        return T_ID
 
-    if query.data == "about":
-        text = (
-            "ℹ️ **About Horizon Tutors Hub**\n"
-            "We are a premier tutoring agency bridging the gap between eager students and "
-            "qualified, verified professional tutors across Adama and Bishoftu.\n\n"
-            "💡 **Agency Policy:** Enjoy a 1-day trial session. Commission is 50% after successful trial."
-            if lang == "en" else
-            "ℹ️ **ስለ ሆራይዘን የቱተርስ ሃብ**\n"
-            "እኛ በአዳማ እና በቢሾፍቱ ከተሞች ጥራት ያላቸውን እና ብቁ መምህራንን ከተማሪዎች ጋር የምናገናኝ ድርጅት ነን።\n\n"
-            "💡 **የድርጅቱ ህግ:** የ 1 ቀን የሙከራ ትምህርት (Trial) አለ። የኮሚሽን ክፍያ 50% የሚከፈለው ከሙከራው በኋላ ነው።"
-        )
-        kb = [[InlineKeyboardButton("🔙 Back / ተመለስ", callback_data="back_home")]]
-        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
-        return MENU
-        
-    elif query.data == "support":
-        text = (
-            "📞 **Customer Support & Assistance**\n"
-            "👤 Telegram: @simon_1919\n"
-            "📱 Phone: +251 90 088 2373"
-            if lang == "en" else
-            "📞 **የዕርዳታ ማዕከል**\n"
-            "👤 ቴሌግራም: @simon_1919\n"
-            "📱 ስልክ ቁጥር: +251 90 088 2373"
-        )
-        kb = [[InlineKeyboardButton("🔙 Back / ተመለስ", callback_data="back_home")]]
-        await query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
-        return MENU
-        
-    elif query.data == "cancel_action":
-        return await cancel_callback(update, context)
-        
-    elif query.data == "back_home":
-        return await start(update, context)
-    
-    return MENU
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    help_text = (
-        "📖 **Horizon Tutors Hub - Help Guide**\n\n"
-        "👤 **User Commands:**\n"
-        "• /start - Open main menu & choose language\n"
-        "• /cancel - Abort current operation\n\n"
-        "🛠️ **Admin Commands:**\n"
-        "• /stats - View live agency database counts\n"
-        "• /search [Keyword] - Search approved tutors\n"
-        "• /catchup - View active pending items in memory\n"
-        "• /broadcast [Job Code] - Broadcast a job vacancy to channel\n"
-        "• /testblur - Test sharpness score of an ID photo"
-    )
-    await update.message.reply_text(help_text, parse_mode="Markdown")
-
-async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    sheet = get_gspread_client()
-    if sheet:
+    ud["busy"] = True
+    try:
+        # 1) download
         try:
-            tutors_count = len(sheet.worksheet("Tutors").get_all_values()) - 1
-            requests_count = len(sheet.worksheet("Client_Requests").get_all_values()) - 1
-            await update.message.reply_text(
-                f"📊 **Live Agency Stats (Horizon Tutors Hub)**\n\n"
-                f"👨‍🏫 Approved Tutors: `{max(0, tutors_count)}`\n"
-                f"📚 Total Student Requests: `{max(0, requests_count)}`\n"
-                f"📍 Active Cities: Adama & Bishoftu",
-                parse_mode="Markdown"
-            )
+            tg_file = await tg_obj.get_file()
+            raw = bytes(await tg_file.download_as_bytearray())
+        except Exception:
+            logger.exception("Telegram file download failed | user=%s", user.id)
+            await msg.reply_text(tr(context, "dl_failed"))
+            return T_ID
+
+        # 2) sharpness check
+        ok, score, reason = await asyncio.to_thread(check_sharpness, raw)
+        if reason == "not_image":
+            await msg.reply_text(tr(context, "not_image"))
+            return T_ID
+        if not ok:
+            await msg.reply_text(tr(context, "blurry"))
+            return T_ID
+
+        await msg.reply_text(tr(context, "processing"))
+
+        # 3) Drive upload (skipped on retry if it already succeeded)
+        if not ud.get("id_link"):
+            fname = f"TutorID_{user.id}_{datetime.now(EAT).strftime('%Y%m%d_%H%M%S')}.{ext}"
+            try:
+                f = await asyncio.to_thread(upload_to_drive, raw, fname, mime)
+                ud["id_link"] = f.get("webViewLink") or f"https://drive.google.com/file/d/{f.get('id')}/view"
+            except Exception as e:
+                logger.error("TUTOR SAVE FAILED at DRIVE step | user=%s | %s", user.id, e, exc_info=True)
+                await notify_admin(context, f"⚠️ Drive upload FAILED for tutor {user.id}:\n{e}")
+                await msg.reply_text(tr(context, "save_failed_photo"))
+                return T_ID
+
+        # 4) Sheet append
+        data = {
+            "Timestamp": now_str(), "Telegram ID": user.id, "Username": user_tag(user),
+            "Full Name": ud["name"], "Phone": ud["phone"], "Gender": ud["gender"],
+            "Subject": ud["subject"], "Grade Level": ud["grade"], "City": ud["city"],
+            "Neighborhood": ud["hood"], "ID Photo Link": ud["id_link"],
+            "Language": lang_of(context), "Status": "Pending",
+        }
+        try:
+            code, rng = await asyncio.to_thread(append_with_code, "Tutors", "TUT", data)
         except Exception as e:
-            await update.message.reply_text(f"❌ Error fetching stats from Google Sheets: {e}")
-    else:
-        await update.message.reply_text("❌ Database connection error.")
+            logger.error("TUTOR SAVE FAILED at SHEETS step (ID already on Drive: %s) | user=%s | %s",
+                         ud["id_link"], user.id, e, exc_info=True)
+            await notify_admin(context, f"⚠️ Sheets append FAILED for tutor {user.id}:\n{e}\n"
+                                        f"ID photo already on Drive: {ud['id_link']}")
+            await msg.reply_text(tr(context, "save_failed_photo"))
+            return T_ID
 
-async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("🔍 Usage: `/search [keyword]`", parse_mode="Markdown")
-        return
-    query_keyword = " ".join(context.args).lower()
-    sheet = get_gspread_client()
-    if not sheet:
-        await update.message.reply_text("❌ Database connection error.")
-        return
+        # 5) Admin notification with Approve / Reject
+        caption = (
+            f"🆕 <b>Tutor registration {esc(code)}</b>\n"
+            f"👤 {esc(ud['name'])}  |  {esc(ud['gender'])}\n"
+            f"📞 {esc(ud['phone'])}\n"
+            f"📚 {esc(ud['subject'])}  |  🎓 {esc(ud['grade'])}\n"
+            f"📍 {esc(ud['hood'])}, {esc(ud['city'])}\n"
+            f"🔗 <a href=\"{esc(ud['id_link'])}\">ID on Drive</a>\n"
+            f"Telegram: {mention(user)}"
+        )
+        buttons = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Approve", callback_data=f"tA:{code}"),
+            InlineKeyboardButton("❌ Reject", callback_data=f"tR:{code}"),
+        ]])
+        try:
+            if kind == "photo":
+                await context.bot.send_photo(ADMIN_CHAT_ID, tg_obj.file_id, caption=caption,
+                                             parse_mode=ParseMode.HTML, reply_markup=buttons)
+            else:
+                await context.bot.send_document(ADMIN_CHAT_ID, tg_obj.file_id, caption=caption,
+                                                parse_mode=ParseMode.HTML, reply_markup=buttons)
+        except Exception:
+            logger.exception("Admin photo notification failed, falling back to text | code=%s", code)
+            sent = await notify_admin(context, caption, parse_mode=ParseMode.HTML, reply_markup=buttons)
+            if sent is None:
+                logger.error("ADMIN NEVER NOTIFIED about tutor %s - approve manually in the sheet.", code)
+
+        await msg.reply_text(tr(context, "tutor_done", code=code))
+        ud.clear()
+        return ConversationHandler.END
+    finally:
+        ud.pop("busy", None)
+
+
+async def tutor_id_wrong(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(tr(context, "not_image"))
+    return T_ID
+
+
+# --------------------------------------------------------------------------- #
+# Client flow: final step (budget -> Sheet -> admin)
+# --------------------------------------------------------------------------- #
+async def client_budget(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    ud, user = context.user_data, update.effective_user
+    if ud.get("busy"):
+        return C_BUDGET
+    budget = clean(update.message.text, 60)
+    if not budget:
+        return C_BUDGET
+    ud["budget"] = budget
+    ud["busy"] = True
     try:
-        ws = sheet.worksheet("Tutors")
-        rows = ws.get_all_values()
-        matches = [f"👤 **{row[3]}**\n📞 `{row[4]}`\n📚 {row[6]} ({row[7]})\n📍 {row[8]}\n" for row in rows[1:] if query_keyword in " ".join(row).lower()]
-        if matches:
-            await update.message.reply_text(f"🔍 **Search Results:**\n\n" + "\n".join(matches[:10]), parse_mode="Markdown")
+        await update.message.reply_text(tr(context, "processing"))
+        data = {
+            "Timestamp": now_str(), "Telegram ID": user.id, "Username": user_tag(user),
+            "Client Name": ud["name"], "Phone": ud["phone"], "Student Grade": ud["grade"],
+            "Subject": ud["subject"], "City": ud["city"], "Neighborhood": ud["hood"],
+            "Requirements": ud["req"], "Budget": budget,
+            "Language": lang_of(context), "Status": "Pending",
+        }
+        try:
+            code, rng = await asyncio.to_thread(append_with_code, "Client_Requests", "HRZ", data)
+        except Exception as e:
+            logger.error("CLIENT SAVE FAILED at SHEETS step | user=%s | %s", user.id, e, exc_info=True)
+            await notify_admin(context, f"⚠️ Sheets append FAILED for client request from {user.id}:\n{e}")
+            await update.message.reply_text(tr(context, "save_failed_text"))
+            return C_BUDGET
+
+        text = (
+            f"🆕 <b>Client request {esc(code)}</b>\n"
+            f"👤 {esc(ud['name'])}\n"
+            f"📞 {esc(ud['phone'])}\n"
+            f"🎓 Student grade: {esc(ud['grade'])}\n"
+            f"📚 Subject: {esc(ud['subject'])}\n"
+            f"📍 {esc(ud['hood'])}, {esc(ud['city'])}\n"
+            f"💰 Budget: {esc(budget)} ETB\n"
+            f"📝 {esc(ud['req'])}\n"
+            f"Telegram: {mention(user)}"
+        )
+        buttons = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Approve", callback_data=f"cA:{code}"),
+            InlineKeyboardButton("❌ Reject", callback_data=f"cR:{code}"),
+        ]])
+        sent = await notify_admin(context, text, parse_mode=ParseMode.HTML, reply_markup=buttons)
+        if sent is None:
+            logger.error("ADMIN NEVER NOTIFIED about client request %s - approve manually in the sheet.", code)
+
+        await update.message.reply_text(tr(context, "client_done", code=code))
+        ud.clear()
+        return ConversationHandler.END
+    finally:
+        ud.pop("busy", None)
+
+
+# --------------------------------------------------------------------------- #
+# Admin approve / reject
+# --------------------------------------------------------------------------- #
+ADMIN_LOCK = asyncio.Lock()
+
+
+def _is_admin(q) -> bool:
+    return q.from_user.id == ADMIN_CHAT_ID or (q.message is not None and q.message.chat.id == ADMIN_CHAT_ID)
+
+
+async def _mark_admin_message(q, suffix: str):
+    msg = q.message
+    try:
+        if msg.caption is not None or msg.photo or msg.document:
+            await q.edit_message_caption(caption=(msg.caption_html or "") + suffix,
+                                         parse_mode=ParseMode.HTML, reply_markup=None)
         else:
-            await update.message.reply_text(f"🔍 No matching tutors found.")
-    except Exception as e:
-        await update.message.reply_text(f"❌ Search error: {e}")
+            await q.edit_message_text(text=(msg.text_html or "") + suffix,
+                                      parse_mode=ParseMode.HTML, reply_markup=None)
+    except Exception:
+        logger.exception("Could not edit admin message")
 
-async def catchup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    pending_items = [k for k in context.bot_data.keys() if k.startswith("pending_")]
-    if not pending_items:
-        await update.message.reply_text("📋 No pending items in memory.")
-        return
-    await update.message.reply_text(f"📋 **Pending Items ({len(pending_items)}):**\n" + "\n".join(f"• `{item}`" for item in pending_items), parse_mode="Markdown")
 
-async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("📢 Usage: `/broadcast [Job Code]`", parse_mode="Markdown")
+def _channel_post(data: dict, code: str, bot_username: str):
+    text = (
+        f"📢 <b>NEW TUTOR JOB {esc(code)}</b>\n\n"
+        f"📚 Subject / ትምህርት: {esc(data.get('Subject', ''))}\n"
+        f"🎓 Grade / ክፍል: {esc(data.get('Student Grade', ''))}\n"
+        f"📍 Area / አካባቢ: {esc(data.get('Neighborhood', ''))}, {esc(data.get('City', ''))}\n"
+        f"💰 Budget / በጀት: {esc(data.get('Budget', ''))} ETB\n"
+        f"📝 Details / ዝርዝር: {esc(data.get('Requirements', ''))}"
+    )
+    markup = InlineKeyboardMarkup([[
+        InlineKeyboardButton("📩 Apply / ያመልክቱ", url=f"https://t.me/{bot_username}")
+    ]])
+    return text, markup
+
+
+async def admin_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if not _is_admin(q):
+        await q.answer("Not authorized.", show_alert=True)
+        logger.warning("Unauthorized admin-button press by user %s", q.from_user.id)
         return
-    job_code_target = context.args[0].replace("#", "")
-    job_channel_id = os.environ.get("JOB_CHANNEL_ID")
-    sheet = get_gspread_client()
-    if not sheet or not job_channel_id:
-        await update.message.reply_text("❌ Configuration or database error.")
-        return
-    try:
-        rows = sheet.worksheet("Client_Requests").get_all_values()
-        found_row = next((r for r in rows[1:] if len(r) > 1 and r[1] == job_code_target), None)
-        if not found_row:
-            await update.message.reply_text(f"❌ Job Code `#{job_code_target}` not found.", parse_mode="Markdown")
+    await q.answer()
+
+    action, code = q.data.split(":", 1)
+    is_tutor = action in ("tA", "tR")
+    approve = action.endswith("A")
+    tab = "Tutors" if is_tutor else "Client_Requests"
+
+    async with ADMIN_LOCK:
+        try:
+            rec = await asyncio.to_thread(find_record, tab, code)
+        except Exception as e:
+            logger.error("Admin decision: sheet lookup failed | %s | %s", code, e, exc_info=True)
+            await q.message.reply_text(f"❌ Sheets lookup failed for {code}:\n{e}")
             return
-        channel_msg = (
-            f"🟢 **OPEN VACANCY**\n\n"
-            f"🏫 **Grade:** {found_row[7]}\n"
-            f"🏙️ **City:** {found_row[8]} ({found_row[9]})\n"
-            f"📚 **Subject:** {found_row[6]}\n"
-            f"💰 **Budget:** {found_row[12]}\n"
-            f"💬 **Job code:** #{job_code_target}\n\n"
-            f"💡 *Policy: 1-day trial session. Agency commission (50%) applies after successful trial.*"
-        )
-        bot_username = context.bot.username
-        channel_kb = [[InlineKeyboardButton("Apply Now", url=f"https://t.me/{bot_username}?start=apply_{job_code_target}")]]
-        await context.bot.send_message(chat_id=job_channel_id, text=channel_msg, reply_markup=InlineKeyboardMarkup(channel_kb), parse_mode="Markdown")
-        await update.message.reply_text(f"✅ Successfully broadcasted `#{job_code_target}`!", parse_mode="Markdown")
-    except Exception as e:
-        await update.message.reply_text(f"❌ Broadcast error: {e}")
+        if rec is None:
+            await q.message.reply_text(f"❌ {code} not found in '{tab}'. Was the row deleted?")
+            return
+        row_no, data = rec
+        current = (data.get("Status") or "").strip()
+        if current.lower() != "pending":
+            await _mark_admin_message(q, f"\n\nℹ️ Already <b>{esc(current)}</b>.")
+            return
 
-async def testblur_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message.reply_to_message or not update.message.reply_to_message.photo:
-        await update.message.reply_text("📷 Reply to an ID photo with `/testblur`.", parse_mode="Markdown")
-        return
-    photo_file = await update.message.reply_to_message.photo[-1].get_file()
-    nparr = np.frombuffer(await photo_file.download_as_bytearray(), np.uint8)
-    img = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE)
-    sharpness = round(cv2.Laplacian(img, cv2.CV_64F).var(), 2) if img is not None else 0.0
-    await update.message.reply_text(f"📐 Sharpness Score: `{sharpness}`", parse_mode="Markdown")
+        # Broadcast first (client approvals) so a failed post leaves the request Pending for retry
+        if approve and not is_tutor:
+            try:
+                text, markup = _channel_post(data, code, context.bot.username)
+                await context.bot.send_message(JOB_CHANNEL_ID, text, parse_mode=ParseMode.HTML,
+                                               reply_markup=markup)
+                logger.info("Broadcast OK | %s -> %s", code, JOB_CHANNEL_ID)
+            except Exception as e:
+                logger.error("CHANNEL BROADCAST FAILED | %s | channel=%s | %s", code, JOB_CHANNEL_ID, e,
+                             exc_info=True)
+                await q.message.reply_text(
+                    f"❌ Could not post {code} to the channel ({e}).\n"
+                    "Make sure the bot is an ADMIN of the channel with permission to post. "
+                    "The request is still Pending - press Approve again after fixing it.")
+                return
 
-# --- Tutor Registration Flow ---
+        new_status = "Approved" if approve else "Rejected"
+        try:
+            await asyncio.to_thread(set_status, tab, row_no, new_status)
+        except Exception as e:
+            logger.error("Admin decision: status update failed | %s | %s", code, e, exc_info=True)
+            warn = "⚠️ It WAS posted to the channel but the sheet status could not be updated. " if (
+                approve and not is_tutor) else ""
+            await q.message.reply_text(f"❌ Could not update status for {code}:\n{e}\n{warn}Update it manually.")
+            return
 
-async def reg_tutor_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    lang = context.user_data.get("lang", "en")
-    await query.message.edit_text("Please enter your full name:" if lang == "en" else "እባክዎ ሙሉ ስምዎን ያስገቡ:")
-    return TUTOR_NAME
-
-async def tutor_name_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["tutor_name"] = update.message.text
-    lang = context.user_data.get("lang", "en")
-    contact_keyboard = ReplyKeyboardMarkup([[KeyboardButton("📱 Share Phone", request_contact=True)]], resize_keyboard=True, one_time_keyboard=True)
-    await update.message.reply_text("Please share your contact phone number:" if lang == "en" else "እባክዎ ስልክ ቁጥርዎን ያጋሩ:", reply_markup=contact_keyboard)
-    return TUTOR_PHONE
-
-async def tutor_phone_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["tutor_phone"] = update.message.contact.phone_number if update.message.contact else update.message.text
-    kb = [
-        [InlineKeyboardButton("👨 Male / ወንድ", callback_data="tgen_male")],
-        [InlineKeyboardButton("👩 Female / ሴት", callback_data="tgen_female")],
-    ]
-    await update.message.reply_text("Select gender / ጾታዎን ይምረጡ:", reply_markup=InlineKeyboardMarkup(kb))
-    return TUTOR_GENDER
-
-async def tutor_gender_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    context.user_data["tutor_gender"] = "Male" if query.data == "tgen_male" else "Female"
-    kb = [
-        [InlineKeyboardButton("📚 All Subjects", callback_data="tsubj_all")],
-        [InlineKeyboardButton("🔢 Mathematics", callback_data="tsubj_math")],
-        [InlineKeyboardButton("⚗️ Science", callback_data="tsubj_science")],
-        [InlineKeyboardButton("📝 English", callback_data="tsubj_english")],
-    ]
-    await query.message.edit_text("Select subject:", reply_markup=InlineKeyboardMarkup(kb))
-    return TUTOR_SUBJECT
-
-async def tutor_subject_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    mapping = {"tsubj_all": "All Subjects", "tsubj_math": "Mathematics", "tsubj_science": "Physics & Chemistry", "tsubj_english": "English"}
-    context.user_data["tutor_subject"] = mapping.get(query.data, "Custom")
-    kb = [
-        [InlineKeyboardButton("Kindergarten (KG)", callback_data="tcat_kg")],
-        [InlineKeyboardButton("Primary", callback_data="tcat_primary")],
-        [InlineKeyboardButton("Secondary", callback_data="tcat_secondary")],
-    ]
-    await query.message.edit_text("Select grade category:", reply_markup=InlineKeyboardMarkup(kb))
-    return TUTOR_GRADE_CAT
-
-async def tutor_grade_cat_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    category = "Kindergarten (KG)" if query.data == "tcat_kg" else ("Primary" if query.data == "tcat_primary" else "Secondary")
-    context.user_data["tutor_grade_cat"] = category
-    
-    if category == "Kindergarten (KG)":
-        kb = [[InlineKeyboardButton("KG 1", callback_data="tgrade_kg1"), InlineKeyboardButton("KG 2", callback_data="tgrade_kg2")]]
-    elif category == "Primary":
-        kb = [[InlineKeyboardButton("Grade 1", callback_data="tgrade_1"), InlineKeyboardButton("Grade 8", callback_data="tgrade_8")]]
-    else:
-        kb = [[InlineKeyboardButton("Grade 9", callback_data="tgrade_9"), InlineKeyboardButton("Grade 12", callback_data="tgrade_12")]]
-    await query.message.edit_text(f"Select exact grade under {category}:", reply_markup=InlineKeyboardMarkup(kb))
-    return TUTOR_GRADE_SPECIFIC
-
-async def tutor_grade_specific_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    context.user_data["tutor_grade_specific"] = query.data.replace("tgrade_", "").title()
-    kb = [
-        [InlineKeyboardButton("Adama", callback_data="city_adama")],
-        [InlineKeyboardButton("Bishoftu", callback_data="city_bishoftu")],
-    ]
-    await query.message.edit_text("Select your city:", reply_markup=InlineKeyboardMarkup(kb))
-    return TUTOR_CITY
-
-async def tutor_city_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    context.user_data["tutor_city"] = "Adama" if query.data == "city_adama" else "Bishoftu"
-    await query.message.edit_text("📍 Enter your specific neighborhood or Kebele:")
-    return TUTOR_SPECIFIC_LOC
-
-async def tutor_specific_loc_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["tutor_specific_loc"] = update.message.text
-    await update.message.reply_text("📷 Please upload a clear photo of your National ID card:")
-    return TUTOR_ID
-
-async def tutor_id_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message.photo:
-        await update.message.reply_text("Please upload an image file of your ID.")
-        return TUTOR_ID
-
-    logger.info("📥 [ID UPLOAD] Received ID photo from user. Starting background processing...")
-
+    # Tell the user
+    lang = data.get("Language", "en")
+    key = ("tutor_" if is_tutor else "client_") + ("approved" if approve else "rejected")
     try:
-        photo_file = await update.message.photo[-1].get_file()
-        file_bytes = await photo_file.download_as_bytearray()
-        
-        user = update.effective_user
-        full_name = context.user_data.get('tutor_name', 'Tutor')
-        safe_name = full_name.replace(" ", "_")
-        username = f"@{user.username}" if user.username else f"id_{user.id}"
-        file_name = f"{safe_name}_{username}.jpg"
+        await context.bot.send_message(int(data["Telegram ID"]), tr_lang(lang, key, code=code))
+    except Exception:
+        logger.exception("Could not notify user %s about %s", data.get("Telegram ID"), code)
+        await q.message.reply_text(f"⚠️ {code} was {new_status.lower()}, but the user could not be notified "
+                                   "(they may have blocked the bot).")
 
-        logger.info(f"🚀 [ID UPLOAD] Uploading {file_name} to Google Drive folder...")
-        drive_link = await asyncio.to_thread(sync_upload_to_drive, file_bytes, file_name)
-        context.user_data["tutor_drive_link"] = drive_link or "N/A"
-        context.user_data["tutor_username"] = username
-        context.user_data["telegram_id"] = user.id
+    icon = "✅" if approve else "❌"
+    await _mark_admin_message(q, f"\n\n{icon} <b>{new_status}</b> by {esc(q.from_user.full_name)}")
 
-        # Compute sharpness score via OpenCV
-        nparr = np.frombuffer(file_bytes, np.uint8)
-        img = cv2.imdecode(nparr, cv2.IMREAD_GRAYSCALE)
-        sharpness = round(cv2.Laplacian(img, cv2.CV_64F).var(), 2) if img is not None else 0.0
 
-        session_key = f"pending_tutor_{user.id}_{int(datetime.now().timestamp())}"
-        context.bot_data[session_key] = context.user_data.copy()
+# --------------------------------------------------------------------------- #
+# Misc handlers
+# --------------------------------------------------------------------------- #
+async def fallback_hint(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(TEXT["en"]["hint"] + "\n" + TEXT["am"]["hint"])
 
-        admin_chat_id = os.environ.get("ADMIN_CHAT_ID")
-        if admin_chat_id:
-            review_text = (
-                f"🔔 **New Tutor Review**\n\n"
-                f"👤 Name: {full_name}\n"
-                f"🏷️ Username: {username}\n"
-                f"📞 Phone: {context.user_data.get('tutor_phone')}\n"
-                f"⚧️ Gender: {context.user_data.get('tutor_gender')}\n"
-                f"📚 Subject: {context.user_data.get('tutor_subject')}\n"
-                f"🏫 Grade: {context.user_data.get('tutor_grade_cat')} - {context.user_data.get('tutor_grade_specific')}\n"
-                f"🏙️ Location: {context.user_data.get('tutor_city')} ({context.user_data.get('tutor_specific_loc')})\n"
-                f"📁 [Secure Drive ID Link ({file_name})]({drive_link})\n"
-                f"📐 Sharpness: `{sharpness}`"
-            )
-            kb = [[InlineKeyboardButton("✅ Approve", callback_data=f"app_tutor_{session_key}"), InlineKeyboardButton("❌ Reject", callback_data=f"rej_tutor_{session_key}")]]
-            try:
-                await context.bot.send_photo(chat_id=admin_chat_id, photo=photo_file.file_id, caption=review_text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
-                logger.info("✅ [ID UPLOAD] Admin review notification sent successfully.")
-            except Exception as admin_err:
-                logger.error(f"❌ [ID UPLOAD] Failed to send admin review photo: {admin_err}")
 
-        channel_link = os.environ.get("CHANNEL_INVITE_LINK", "https://t.me/HorizonTutorsHub")
-        kb = [[InlineKeyboardButton("📢 Join Channel", url=channel_link)], [InlineKeyboardButton("🔙 Main Menu", callback_data="back_home")]]
-        await update.message.reply_text("✅ Registration submitted successfully! Your ID photo has been securely stored. We will review it soon.", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
-        logger.info("🎉 [ID UPLOAD] Tutor registration successfully completed and confirmed to user.")
-    
-    except Exception as e:
-        logger.error(f"❌ CRITICAL EXCEPTION in tutor_id_received: {str(e)}")
-        await update.message.reply_text("⚠️ An error occurred while processing your upload. Please try again or type /start to restart.")
-    
-    return MENU
+async def on_error(update, context: ContextTypes.DEFAULT_TYPE):
+    logger.error("Unhandled exception while processing an update", exc_info=context.error)
+    if isinstance(update, Update) and update.effective_message:
+        try:
+            lang = (context.user_data or {}).get("lang", "en") if context.user_data is not None else "en"
+            await update.effective_message.reply_text(tr_lang(lang, "error"))
+        except Exception:
+            pass
 
-# --- Student Request Flow ---
 
-async def req_tutor_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    await query.message.edit_text("Please enter student's or parent's full name:")
-    return REQ_NAME
+def build_application() -> Application:
+    app = Application.builder().token(TELEGRAM_TOKEN).build()
 
-async def req_name_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["req_name"] = update.message.text
-    contact_keyboard = ReplyKeyboardMarkup([[KeyboardButton("📱 Share Phone", request_contact=True)]], resize_keyboard=True, one_time_keyboard=True)
-    await update.message.reply_text("Please share your contact phone number:", reply_markup=contact_keyboard)
-    return REQ_PHONE
+    conv = ConversationHandler(
+        entry_points=[CommandHandler("start", cmd_start, filters=PRIVATE)],
+        states={
+            LANG: [CallbackQueryHandler(set_lang, pattern=r"^lang:(en|am)$")],
+            MENU: [CallbackQueryHandler(menu_choice, pattern=r"^menu:(tutor|client)$")],
 
-async def req_phone_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["req_phone"] = update.message.contact.phone_number if update.message.contact else update.message.text
-    kb = [[InlineKeyboardButton("Mathematics", callback_data="rsubj_math")], [InlineKeyboardButton("All Subjects", callback_data="rsubj_all")]]
-    await update.message.reply_text("Choose subject:", reply_markup=ReplyKeyboardRemove())
-    await update.message.reply_text("Select subject:", reply_markup=InlineKeyboardMarkup(kb))
-    return REQ_SUBJECT
+            T_NAME: [MessageHandler(TEXT_ONLY, text_step(T_NAME, "name", T_PHONE, "ask_phone"))],
+            T_PHONE: [MessageHandler(TEXT_ONLY, text_step(
+                T_PHONE, "phone", T_GENDER, "ask_gender", maxlen=30,
+                validator=normalize_phone, error_key="bad_phone", markup_fn=gender_keyboard))],
+            T_GENDER: [CallbackQueryHandler(choice_step("gender", T_SUBJECT, "ask_subject"),
+                                            pattern=r"^gender:(Male|Female)$")],
+            T_SUBJECT: [MessageHandler(TEXT_ONLY, text_step(T_SUBJECT, "subject", T_GRADE, "ask_grade"))],
+            T_GRADE: [MessageHandler(TEXT_ONLY, text_step(
+                T_GRADE, "grade", T_CITY, "ask_city", markup_fn=city_keyboard))],
+            T_CITY: [CallbackQueryHandler(choice_step("city", T_HOOD, "ask_hood"),
+                                          pattern=r"^city:(Adama|Bishoftu)$")],
+            T_HOOD: [MessageHandler(TEXT_ONLY, text_step(T_HOOD, "hood", T_ID, "ask_id"))],
+            T_ID: [
+                MessageHandler((filters.PHOTO | filters.Document.IMAGE) & PRIVATE, tutor_id),
+                MessageHandler(filters.ALL & ~filters.COMMAND & PRIVATE, tutor_id_wrong),
+            ],
 
-async def req_subject_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    context.user_data["req_subject"] = "Mathematics" if query.data == "rsubj_math" else "All Subjects"
-    kb = [[InlineKeyboardButton("Primary", callback_data="rcat_primary")], [InlineKeyboardButton("Secondary", callback_data="rcat_secondary")]]
-    await query.message.edit_text("Select grade category:", reply_markup=InlineKeyboardMarkup(kb))
-    return REQ_GRADE_CAT
+            C_NAME: [MessageHandler(TEXT_ONLY, text_step(C_NAME, "name", C_PHONE, "ask_phone"))],
+            C_PHONE: [MessageHandler(TEXT_ONLY, text_step(
+                C_PHONE, "phone", C_GRADE, "ask_student_grade", maxlen=30,
+                validator=normalize_phone, error_key="bad_phone"))],
+            C_GRADE: [MessageHandler(TEXT_ONLY, text_step(C_GRADE, "grade", C_SUBJECT, "ask_c_subject"))],
+            C_SUBJECT: [MessageHandler(TEXT_ONLY, text_step(
+                C_SUBJECT, "subject", C_CITY, "ask_city", markup_fn=city_keyboard))],
+            C_CITY: [CallbackQueryHandler(choice_step("city", C_HOOD, "ask_hood"),
+                                          pattern=r"^city:(Adama|Bishoftu)$")],
+            C_HOOD: [MessageHandler(TEXT_ONLY, text_step(C_HOOD, "hood", C_REQ, "ask_req"))],
+            C_REQ: [MessageHandler(TEXT_ONLY, text_step(C_REQ, "req", C_BUDGET, "ask_budget", maxlen=600))],
+            C_BUDGET: [MessageHandler(TEXT_ONLY, client_budget)],
+        },
+        fallbacks=[
+            CommandHandler("cancel", cmd_cancel),
+            CommandHandler("start", cmd_start, filters=PRIVATE),
+        ],
+        allow_reentry=True,
+    )
+    app.add_handler(conv)
+    app.add_handler(CallbackQueryHandler(admin_decision, pattern=r"^(tA|tR|cA|cR):"))
+    app.add_handler(CommandHandler("myid", cmd_myid))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & PRIVATE, fallback_hint))
+    app.add_error_handler(on_error)
+    return app
 
-async def req_grade_cat_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    context.user_data["req_grade_cat"] = "Primary" if query.data == "rcat_primary" else "Secondary"
-    kb = [[InlineKeyboardButton("Grade 5", callback_data="rgrade_5")], [InlineKeyboardButton("Grade 9", callback_data="rgrade_9")]]
-    await query.message.edit_text("Select exact grade:", reply_markup=InlineKeyboardMarkup(kb))
-    return REQ_GRADE_SPECIFIC
 
-async def req_grade_specific_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    context.user_data["req_grade_specific"] = query.data.replace("rgrade_", "").title()
-    kb = [[InlineKeyboardButton("Adama", callback_data="reqcity_adama")], [InlineKeyboardButton("Bishoftu", callback_data="reqcity_bishoftu")]]
-    await query.message.edit_text("Select city:", reply_markup=InlineKeyboardMarkup(kb))
-    return REQ_CITY
+# --------------------------------------------------------------------------- #
+# Flask keep-alive (Render needs an open HTTP port)
+# --------------------------------------------------------------------------- #
+flask_app = Flask(__name__)
 
-async def req_city_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    context.user_data["req_city"] = "Adama" if query.data == "reqcity_adama" else "Bishoftu"
-    await query.message.edit_text("📍 Enter specific neighborhood or Kebele (Place):")
-    return REQ_SPECIFIC_LOC
 
-async def req_specific_loc_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["req_specific_loc"] = update.message.text
-    kb = [
-        [InlineKeyboardButton("👨 Male Tutor", callback_data="rgend_male")],
-        [InlineKeyboardButton("👩 Female Tutor", callback_data="rgend_female")],
-        [InlineKeyboardButton("⭐ Any Gender", callback_data="rgend_any")]
-    ]
-    await update.message.reply_text("Select preferred tutor gender:", reply_markup=InlineKeyboardMarkup(kb))
-    return REQ_GENDER_PREF
+@flask_app.route("/")
+def home():
+    return "Horizon Tutors Hub bot is running.", 200
 
-async def req_gender_pref_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    mapping = {"rgend_male": "Male", "rgend_female": "Female", "rgend_any": "Any"}
-    context.user_data["req_gender_pref"] = mapping.get(query.data, "Any")
-    kb = [[InlineKeyboardButton("🤝 Negotiable", callback_data="rbudget_negotiable")]]
-    await query.message.edit_text("💰 Click Negotiable or type your budget:", reply_markup=InlineKeyboardMarkup(kb))
-    return REQ_BUDGET
 
-async def req_budget_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    context.user_data["req_budget"] = "Negotiable 🤝"
-    context.user_data["req_budget_num"] = "0"
-    return await finalize_client_request(query.message, context)
+@flask_app.route("/health")
+def health():
+    return "ok", 200
 
-async def req_budget_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    val = update.message.text
-    context.user_data["req_budget"] = val
-    context.user_data["req_budget_num"] = ''.join(filter(str.isdigit, val)) or "0"
-    return await finalize_client_request(update.message, context)
 
-async def finalize_client_request(message_obj, context):
-    job_code = f"HRZ-{random.randint(1000, 9999)}"
-    context.user_data["job_code"] = job_code
-    user_id = message_obj.chat.id if hasattr(message_obj, "chat") else message_obj.chat_id
-    
-    context.user_data["client_telegram_id"] = user_id
-    context.user_data["client_username"] = f"@{message_obj.chat.username}" if hasattr(message_obj, "chat") and message_obj.chat.username else "N/A"
+def run_flask():
+    port = int(os.environ.get("PORT", "10000"))
+    logger.info("Flask keep-alive listening on 0.0.0.0:%s", port)
+    flask_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
-    session_key = f"pending_req_{user_id}_{int(datetime.now().timestamp())}"
-    context.bot_data[session_key] = context.user_data.copy()
 
-    admin_chat_id = os.environ.get("ADMIN_CHAT_ID")
-    if admin_chat_id:
-        review_text = (
-            f"🔔 **New Student Request**\n\n"
-            f"🆔 Job Code: `{job_code}`\n"
-            f"👤 Client: {context.user_data.get('req_name')}\n"
-            f"📞 Phone: {context.user_data.get('req_phone')}\n"
-            f"📚 Subject: {context.user_data.get('req_subject')}\n"
-            f"🏫 Grade: {context.user_data.get('req_grade_cat')} - {context.user_data.get('req_grade_specific')}\n"
-            f"🏙️ Location: {context.user_data.get('req_city')} ({context.user_data.get('req_specific_loc')})\n"
-            f"⚧️ Tutor Gender Pref: {context.user_data.get('req_gender_pref')}\n"
-            f"💰 Budget: {context.user_data.get('req_budget')}"
-        )
-        kb = [[InlineKeyboardButton("✅ Approve & Post", callback_data=f"app_req_{session_key}"), InlineKeyboardButton("❌ Reject", callback_data=f"rej_req_{session_key}")]]
-        await context.bot.send_message(chat_id=admin_chat_id, text=review_text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+def keep_alive_pinger():
+    url = os.environ.get("RENDER_EXTERNAL_URL", "").strip()
+    if not url:
+        logger.info("RENDER_EXTERNAL_URL not set; self-ping disabled.")
+        return
+    while True:
+        time.sleep(600)
+        try:
+            requests.get(url.rstrip("/") + "/health", timeout=15)
+        except Exception as e:
+            logger.warning("Keep-alive ping failed: %s", e)
 
-    channel_link = os.environ.get("CHANNEL_INVITE_LINK", "https://t.me/HorizonTutorsHub")
-    kb = [[InlineKeyboardButton("📢 Join Channel", url=channel_link)], [InlineKeyboardButton("🔙 Main Menu", callback_data="back_home")]]
-    text = f"✅ Request submitted! Your Job Code is `#{job_code}`."
-    if hasattr(message_obj, "edit_text"):
-        await message_obj.edit_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
-    else:
-        await message_obj.reply_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
-    return MENU
 
-# --- Admin Approval Handler ---
+# --------------------------------------------------------------------------- #
+# Main (manual asyncio lifecycle: works on Python 3.11 - 3.14)
+# --------------------------------------------------------------------------- #
+async def run_bot():
+    problems = await asyncio.to_thread(run_startup_checks)
 
-async def admin_approval_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
+    app = build_application()
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    me = await app.bot.get_me()
+    logger.info("Bot online as @%s (python %s)", me.username, sys.version.split()[0])
 
-    if data.startswith("app_tutor_"):
-        session_key = data.replace("app_tutor_", "")
-        tutor_data = context.bot_data.get(session_key)
-        if tutor_data:
-            full_location = f"{tutor_data.get('tutor_city')} - {tutor_data.get('tutor_specific_loc')}"
-            db_add_tutor([
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                str(tutor_data.get('telegram_id')),
-                tutor_data.get('tutor_username', 'N/A'),
-                tutor_data.get('tutor_name'),
-                str(tutor_data.get('tutor_phone')),
-                tutor_data.get('tutor_gender'),
-                tutor_data.get('tutor_subject'),
-                f"{tutor_data.get('tutor_grade_cat')} - {tutor_data.get('tutor_grade_specific')}",
-                full_location,
-                "N/A",
-                "Approved",
-                "Active",
-                tutor_data.get('tutor_drive_link', 'N/A')
-            ])
-            await query.edit_message_caption(caption=query.message.caption + "\n\n✅ **APPROVED & SAVED TO SHEET**", parse_mode="Markdown")
-            try:
-                await context.bot.send_message(chat_id=tutor_data.get('telegram_id'), text="🎉 Your tutor registration has been approved!")
-            except Exception:
-                pass
-    elif data.startswith("rej_tutor_"):
-        await query.edit_message_caption(caption=query.message.caption + "\n\n❌ **REJECTED**", parse_mode="Markdown")
-    elif data.startswith("app_req_"):
-        session_key = data.replace("app_req_", "")
-        req_data = context.bot_data.get(session_key)
-        if req_data:
-            job_code = req_data.get('job_code')
-            full_grade = f"{req_data.get('req_grade_cat')} - {req_data.get('req_grade_specific')}"
-            db_add_client_request([
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                job_code,
-                str(req_data.get('client_telegram_id', '')),
-                req_data.get('client_username', 'N/A'),
-                req_data.get('req_name'),
-                str(req_data.get('req_phone')),
-                req_data.get('req_subject'),
-                full_grade,
-                req_data.get('req_city'),
-                req_data.get('req_specific_loc'),
-                req_data.get('req_gender_pref', 'Any'),
-                "1 Month",
-                req_data.get('req_budget'),
-                req_data.get('req_budget_num', '0'),
-                "50%",
-                "Approved",
-                "Open",
-                ""
-            ])
-            job_channel_id = os.environ.get("JOB_CHANNEL_ID")
-            if job_channel_id:
-                channel_msg = (
-                    f"🟢 **OPEN VACANCY**\n\n"
-                    f"🏫 **Grade:** {full_grade}\n"
-                    f"🏙️ **City:** {req_data.get('req_city')} ({req_data.get('req_specific_loc')})\n"
-                    f"📚 **Subject:** {req_data.get('req_subject')}\n"
-                    f"💰 **Budget:** {req_data.get('req_budget')}\n"
-                    f"💬 **Job code:** #{job_code}\n\n"
-                    f"💡 *Policy: 1-day trial session. Agency commission (50%) applies after successful trial.*"
-                )
-                bot_username = context.bot.username
-                channel_kb = [[InlineKeyboardButton("Apply Now", url=f"https://t.me/{bot_username}?start=apply_{job_code}")]]
-                await context.bot.send_message(chat_id=job_channel_id, text=channel_msg, reply_markup=InlineKeyboardMarkup(channel_kb), parse_mode="Markdown")
-            await query.edit_message_text(text=query.message.text + "\n\n✅ **APPROVED & POSTED TO CHANNEL**", parse_mode="Markdown")
-    elif data.startswith("rej_req_"):
-        await query.edit_message_text(text=query.message.text + "\n\n❌ **REJECTED**", parse_mode="Markdown")
+    status = ("⚠️ <b>Horizon bot started with PROBLEMS</b>\n" + "\n".join(f"• {esc(p)}" for p in problems)
+              if problems else "✅ <b>Horizon bot online.</b> Sheets and Drive checks passed.")
+    try:
+        await app.bot.send_message(ADMIN_CHAT_ID, status[:4000], parse_mode=ParseMode.HTML)
+    except Exception:
+        logger.exception("Could not send startup status to ADMIN_CHAT_ID=%s. Open the bot and press /start "
+                         "from the admin account, then check the ID with /myid.", ADMIN_CHAT_ID)
 
-async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message:
-        await update.message.reply_text("Operation cancelled. Type /start to begin again.", reply_markup=ReplyKeyboardRemove())
-    return ConversationHandler.END
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, stop.set)
+        except NotImplementedError:
+            pass
+    await stop.wait()
 
-async def cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    await query.message.edit_text("Operation cancelled. Type /start to begin again.")
-    return ConversationHandler.END
+    logger.info("Shutting down...")
+    await app.updater.stop()
+    await app.stop()
+    await app.shutdown()
+
 
 def main():
-    token = os.environ.get("TELEGRAM_TOKEN")
-    if not token:
-        logger.error("No TELEGRAM_TOKEN found!")
-        return
+    validate_config()
+    try:
+        get_credentials()  # fail fast, with a precise message, if credentials are unusable
+    except ConfigError as e:
+        logger.critical("GOOGLE CREDENTIALS ERROR: %s", e)
+        raise SystemExit(1)
+    threading.Thread(target=run_flask, daemon=True).start()
+    threading.Thread(target=keep_alive_pinger, daemon=True).start()
+    asyncio.run(run_bot())
 
-    t = Thread(target=run_flask)
-    t.daemon = True
-    t.start()
-
-    application = Application.builder().token(token).post_init(post_init).build()
-
-    # Explicitly set event loop for Python 3.14 compatibility
-    asyncio.set_event_loop(asyncio.new_event_loop())
-
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
-        states={
-            LANG: [CallbackQueryHandler(language_handler, pattern="^lang_")],
-            MENU: [
-                CallbackQueryHandler(menu_callback, pattern="^(about|support|back_home|cancel_action)$"),
-                CallbackQueryHandler(reg_tutor_start, pattern="^reg_tutor$"),
-                CallbackQueryHandler(req_tutor_start, pattern="^req_tutor$"),
-            ],
-            TUTOR_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, tutor_name_received)],
-            TUTOR_PHONE: [MessageHandler((filters.TEXT | filters.CONTACT) & ~filters.COMMAND, tutor_phone_received)],
-            TUTOR_GENDER: [CallbackQueryHandler(tutor_gender_received, pattern="^tgen_")],
-            TUTOR_SUBJECT: [CallbackQueryHandler(tutor_subject_received, pattern="^tsubj_")],
-            TUTOR_GRADE_CAT: [CallbackQueryHandler(tutor_grade_cat_received, pattern="^tcat_")],
-            TUTOR_GRADE_SPECIFIC: [CallbackQueryHandler(tutor_grade_specific_received, pattern="^tgrade_")],
-            TUTOR_CITY: [CallbackQueryHandler(tutor_city_received, pattern="^city_")],
-            TUTOR_SPECIFIC_LOC: [MessageHandler(filters.TEXT & ~filters.COMMAND, tutor_specific_loc_received)],
-            TUTOR_ID: [MessageHandler(filters.PHOTO & ~filters.COMMAND, tutor_id_received)],
-            
-            REQ_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, req_name_received)],
-            REQ_PHONE: [MessageHandler((filters.TEXT | filters.CONTACT) & ~filters.COMMAND, req_phone_received)],
-            REQ_SUBJECT: [CallbackQueryHandler(req_subject_received, pattern="^rsubj_")],
-            REQ_GRADE_CAT: [CallbackQueryHandler(req_grade_cat_received, pattern="^rcat_")],
-            REQ_GRADE_SPECIFIC: [CallbackQueryHandler(req_grade_specific_received, pattern="^rgrade_")],
-            REQ_CITY: [CallbackQueryHandler(req_city_received, pattern="^reqcity_")],
-            REQ_SPECIFIC_LOC: [MessageHandler(filters.TEXT & ~filters.COMMAND, req_specific_loc_received)],
-            REQ_GENDER_PREF: [CallbackQueryHandler(req_gender_pref_received, pattern="^rgend_")],
-            REQ_BUDGET: [
-                CallbackQueryHandler(req_budget_callback, pattern="^rbudget_"),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, req_budget_text)
-            ],
-        },
-        fallbacks=[CommandHandler("cancel", cancel_command)],
-        per_message=False
-    )
-
-    application.add_handler(conv_handler)
-    application.add_handler(CallbackQueryHandler(admin_approval_callback, pattern="^(app|rej)_"))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("broadcast", broadcast_command))
-    application.add_handler(CommandHandler("catchup", catchup_command))
-    application.add_handler(CommandHandler("stats", stats_command))
-    application.add_handler(CommandHandler("search", search_command))
-    application.add_handler(CommandHandler("testblur", testblur_command))
-
-    logger.info("Starting bot polling...")
-    application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()

@@ -216,12 +216,19 @@ def service_account_email() -> str:
 
 
 # --------------------------------------------------------------------------- #
-# Google Sheets layer
+# Google Sheets layer (Aligned with existing sheet headers)
 # --------------------------------------------------------------------------- #
-TUTOR_HEADERS = ["Timestamp", "Tutor Code", "Telegram ID", "Username", "Full Name", "Phone", "Gender",
-                 "Subject", "Grade Level", "City", "Neighborhood", "ID Photo Link", "Language", "Status"]
-CLIENT_HEADERS = ["Timestamp", "Job Code", "Telegram ID", "Username", "Client Name", "Phone", "Student Grade",
-                  "Subject", "City", "Neighborhood", "Requirements", "Budget", "Language", "Status"]
+TUTOR_HEADERS = [
+    "Timestamp", "Tutor Code", "Telegram ID", "Username", "Name", "Phone", "Gender",
+    "Subjects", "Grades", "Location", "Qualification", "ID Verification Status",
+    "Status", "ID File ID"
+]
+CLIENT_HEADERS = [
+    "Timestamp", "Job Code", "Telegram ID", "Username", "Client Name", "Phone",
+    "Subject", "Grade", "City", "Place", "Tutor Gender Pref", "Duration",
+    "Budget", "Budget Number", "Commission Terms", "Verification", "Job Status",
+    "Channel Msg ID"
+]
 TABS = {
     "Tutors": {"headers": TUTOR_HEADERS, "code": "Tutor Code"},
     "Client_Requests": {"headers": CLIENT_HEADERS, "code": "Job Code"},
@@ -339,7 +346,11 @@ def set_status(tab: str, row_no: int, status: str):
         try:
             ws = get_worksheet(tab)
             headers = _read_headers(ws, tab)
-            ws.update_cell(row_no, headers.index("Status") + 1, status)
+            # Find status column ("Status" for Tutors, "Verification" or "Job Status" for Client Requests)
+            status_col_name = "Status" if tab == "Tutors" else "Verification"
+            if status_col_name not in headers:
+                status_col_name = "Job Status"
+            ws.update_cell(row_no, headers.index(status_col_name) + 1, status)
             logger.info("Sheets status updated | tab=%s | row=%s | status=%s", tab, row_no, status)
         except SheetsError:
             raise
@@ -776,13 +787,22 @@ async def tutor_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await msg.reply_text(tr(context, "save_failed_photo"))
                 return T_ID
 
-        # 4) Sheet append
+        # 4) Sheet append matching sheet headers
         data = {
-            "Timestamp": now_str(), "Telegram ID": user.id, "Username": user_tag(user),
-            "Full Name": ud["name"], "Phone": ud["phone"], "Gender": ud["gender"],
-            "Subject": ud["subject"], "Grade Level": ud["grade"], "City": ud["city"],
-            "Neighborhood": ud["hood"], "ID Photo Link": ud["id_link"],
-            "Language": lang_of(context), "Status": "Pending",
+            "Timestamp": now_str(),
+            "Tutor Code": "",
+            "Telegram ID": user.id,
+            "Username": user_tag(user),
+            "Name": ud["name"],
+            "Phone": ud["phone"],
+            "Gender": ud["gender"],
+            "Subjects": ud["subject"],
+            "Grades": ud["grade"],
+            "Location": f"{ud['hood']}, {ud['city']}",
+            "Qualification": "Verified via Telegram",
+            "ID Verification Status": "Pending",
+            "Status": "Pending",
+            "ID File ID": ud["id_link"],
         }
         try:
             code, rng = await asyncio.to_thread(append_with_code, "Tutors", "TUT", data)
@@ -848,11 +868,24 @@ async def client_budget(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await update.message.reply_text(tr(context, "processing"))
         data = {
-            "Timestamp": now_str(), "Telegram ID": user.id, "Username": user_tag(user),
-            "Client Name": ud["name"], "Phone": ud["phone"], "Student Grade": ud["grade"],
-            "Subject": ud["subject"], "City": ud["city"], "Neighborhood": ud["hood"],
-            "Requirements": ud["req"], "Budget": budget,
-            "Language": lang_of(context), "Status": "Pending",
+            "Timestamp": now_str(),
+            "Job Code": "",
+            "Telegram ID": user.id,
+            "Username": user_tag(user),
+            "Client Name": ud["name"],
+            "Phone": ud["phone"],
+            "Subject": ud["subject"],
+            "Grade": ud["grade"],
+            "City": ud["city"],
+            "Place": ud["hood"],
+            "Tutor Gender Pref": "Any",
+            "Duration": "1 Month",
+            "Budget": budget,
+            "Budget Number": ''.join(filter(str.isdigit, budget)) or "0",
+            "Commission Terms": "50%",
+            "Verification": "Pending",
+            "Job Status": "Open",
+            "Channel Msg ID": "",
         }
         try:
             code, rng = await asyncio.to_thread(append_with_code, "Client_Requests", "HRZ", data)
@@ -915,10 +948,9 @@ def _channel_post(data: dict, code: str, bot_username: str):
     text = (
         f"📢 <b>NEW TUTOR JOB {esc(code)}</b>\n\n"
         f"📚 Subject / ትምህርት: {esc(data.get('Subject', ''))}\n"
-        f"🎓 Grade / ክፍል: {esc(data.get('Student Grade', ''))}\n"
-        f"📍 Area / አካባቢ: {esc(data.get('Neighborhood', ''))}, {esc(data.get('City', ''))}\n"
-        f"💰 Budget / በጀት: {esc(data.get('Budget', ''))} ETB\n"
-        f"📝 Details / ዝርዝር: {esc(data.get('Requirements', ''))}"
+        f"🎓 Grade / ክፍል: {esc(data.get('Grade', ''))}\n"
+        f"📍 Area / አካባቢ: {esc(data.get('Place', ''))}, {esc(data.get('City', ''))}\n"
+        f"💰 Budget / በጀት: {esc(data.get('Budget', ''))} ETB"
     )
     markup = InlineKeyboardMarkup([[
         InlineKeyboardButton("📩 Apply / ያመልክቱ", url=f"https://t.me/{bot_username}")
@@ -950,8 +982,13 @@ async def admin_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.message.reply_text(f"❌ {code} not found in '{tab}'. Was the row deleted?")
             return
         row_no, data = rec
-        current = (data.get("Status") or "").strip()
-        if current.lower() != "pending":
+        
+        status_field = "Status" if is_tutor else "Verification"
+        if status_field not in data:
+            status_field = "Job Status"
+            
+        current = (data.get(status_field) or "").strip()
+        if current.lower() not in ("pending", ""):
             await _mark_admin_message(q, f"\n\nℹ️ Already <b>{esc(current)}</b>.")
             return
 

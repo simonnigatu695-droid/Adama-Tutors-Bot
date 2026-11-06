@@ -90,6 +90,7 @@ MIN_IMAGE_SIDE = 480
 MAX_IMAGE_BYTES = 15 * 1024 * 1024
 STARTUP_WRITE_TEST = os.environ.get("STARTUP_WRITE_TEST", "1") != "0"
 JOB_PREFIX = "HRZ"
+CHANNEL_LINK = os.environ.get("CHANNEL_LINK", "https://t.me/HorizonTutorsHub").strip()
 
 ADMIN_CHAT_ID: int = 0           # set in validate_config()
 JOB_CHANNEL_ID = None            # int or "@name", set in validate_config()
@@ -877,131 +878,168 @@ def run_startup_checks() -> list:
 # --------------------------------------------------------------------------- #
 # Texts (English / Amharic)
 # --------------------------------------------------------------------------- #
-GRADE_OPTIONS = [
-    ("KG", "KG", "መዋለ ህጻናት (KG)"),
-    ("G1-4", "Grade 1-4", "1-4ኛ ክፍል"),
-    ("G5-6", "Grade 5-6", "5-6ኛ ክፍል"),
-    ("G7-8", "Grade 7-8", "7-8ኛ ክፍል"),
-    ("G9-10", "Grade 9-10", "9-10ኛ ክፍል"),
-    ("G11-12", "Grade 11-12", "11-12ኛ ክፍል"),
-    ("UNI", "University / College", "ዩኒቨርሲቲ / ኮሌጅ"),
-    ("OTHER", "Other", "ሌላ"),
+# (key, English label, Amharic label, [(code, English label, Amharic label), ...])
+GRADE_SECTIONS = [
+    ("KG", "🧸 KG", "🧸 መዋለ ህጻናት (KG)",
+     [(f"KG{n}", f"KG {n}", f"KG {n}") for n in (1, 2, 3)]),
+    ("PRI", "📘 Primary (Grades 1-8)", "📘 አንደኛ ደረጃ (1-8ኛ ክፍል)",
+     [(f"G{n}", f"Grade {n}", f"{n}ኛ ክፍል") for n in range(1, 9)]),
+    ("HS", "🏫 High School (Grades 9-12)", "🏫 ሁለተኛ ደረጃ (9-12ኛ ክፍል)",
+     [(f"G{n}", f"Grade {n}", f"{n}ኛ ክፍል") for n in range(9, 13)]),
 ]
+UNI_GRADE = ("UNI", "🎓 University / College", "🎓 ዩኒቨርሲቲ / ኮሌጅ")
+# grade code -> English label stored in the sheet
+GRADE_LABELS = {code: en for _, _, _, grades in GRADE_SECTIONS for code, en, _ in grades}
+GRADE_LABELS["UNI"] = "University / College"
 
 TEXT = {
     "en": {
-        "menu": "Welcome to Horizon Tutors Hub! 🎓\nWe connect students with verified tutors in Adama and Bishoftu.\n\nWhat would you like to do?",
-        "btn_tutor": "👨‍🏫 Register as Tutor",
-        "btn_client": "🔎 Find a Tutor",
-        "use_buttons": "Please choose one of the buttons above.",
-        "ask_name": "Please enter your full name:",
-        "ask_phone": "Tap the button below to share your phone number, or type it (e.g. 0912345678):",
+        "menu": "👋 Welcome to Horizon Tutors Hub!\n\nWe connect families in Adama and Bishoftu with trusted, ID-verified tutors, so learning at home is simple, safe and stress-free. 🎓\n\nHow can we help you today?",
+        "btn_tutor": "👨‍🏫 I'm a Tutor - I want jobs",
+        "btn_client": "🔎 I Need a Tutor",
+        "use_buttons": "Please tap one of the buttons above 👆",
+        "ask_name": "Let's get started! 😊 What is your full name?",
+        "ask_phone": "Thanks! 📱 What's the best number to reach you on?\nTap the button below to share it, or just type it (e.g. 0912345678).",
         "share_phone": "📱 Share my phone number",
-        "contact_not_yours": "Please share YOUR OWN phone number using the button below.",
-        "phone_saved": "✅ Phone saved: {phone}",
-        "bad_phone": "That doesn't look like a valid Ethiopian phone number. Tap the button or type it again (e.g. 0912345678).",
-        "ask_gender": "Select your gender:",
-        "male": "Male", "female": "Female",
-        "ask_subject": "Which subject(s) do you teach?",
-        "ask_city": "Select your city:",
-        "adama": "Adama", "bishoftu": "Bishoftu",
-        "ask_hood": "Enter your neighborhood / area:",
-        "ask_id": "Please send a clear photo of your National ID (front side).\nTip: send it as a File (no compression) for best quality.",
+        "contact_not_yours": "Please share YOUR OWN phone number using the button below 🙏",
+        "phone_saved": "✅ Got it: {phone}",
+        "bad_phone": "Hmm, that doesn't look like an Ethiopian mobile number. Tap the button or type it like 0912345678 🙏",
+        "ask_gender": "Please select your gender:",
+        "male": "Male",
+        "female": "Female",
+        "ask_subject": "📚 Which subject(s) do you teach? (e.g. Math, Physics, English)",
+        "ask_city": "📍 Which city are you in?",
+        "adama": "Adama",
+        "bishoftu": "Bishoftu",
+        "ask_hood": "🏘 Which neighborhood / area?",
+        "ask_id": "🪪 Almost done! To keep every family safe, all our tutors are ID-verified. Please send a clear photo of the front of your National ID.\n\n💡 Tip: send it as a File (no compression) and make sure all the text is readable.",
         "not_image": "Please send an image (photo) of your ID.",
         "too_large": "That file is too large. Please send an image under 15 MB.",
-        "blurry": "⚠️ The photo looks blurry or too small to read. Please retake it in good light, hold steady, and send again.",
+        "blurry": "⚠️ That photo looks blurry or too small to read. Please retake it in good light, hold steady, and send it again 📸",
         "dl_failed": "Couldn't download that file. Please try sending it again.",
-        "processing": "⏳ Processing, please wait…",
-        "tutor_done": "✅ Thank you! Your registration was received and is awaiting admin verification.",
+        "processing": "⏳ One moment, saving your details…",
+        "tutor_done": "🎉 Thank you, your registration is in!\n\nOur team is verifying your details now. You'll get a message right here as soon as you're approved, and then you can start applying for jobs.",
         "save_failed_photo": "❌ Sorry, a technical problem prevented us from saving your registration. Nothing was recorded. Send the photo again to retry, or /cancel.",
         "save_failed_text": "❌ Sorry, a technical problem prevented us from saving your request. Nothing was recorded. Send your budget again to retry, or /cancel.",
-        "tutor_approved": "🎉 Your tutor profile has been verified and approved! You can now apply for jobs using the “Apply” button on posts in our channel.",
+        "tutor_approved": "🎉 Congratulations, you're verified and approved!\n\nYou can now apply for jobs: just tap “Apply” under any job post in our channel. Good luck! 🍀",
         "tutor_rejected": "Unfortunately your registration was not approved. Please contact support or re-register with a clear ID photo.",
-        "ask_student_grade": "Select the student's grade / level:",
-        "ask_other_grade": "Please type the grade / level:",
-        "ask_c_subject": "Which subject(s) does the student need help with?",
-        "ask_req": "Describe your requirements (schedule, days per week, tutor gender preference, etc.):",
-        "ask_budget": "What is your budget per month (ETB)?",
-        "client_done": "✅ Your request {code} was received and is awaiting approval. Once approved we'll share it with our tutors.",
-        "client_approved": "🎉 Your request {code} is approved and has been shared with our tutors. We'll connect you soon.",
+        "ask_student_grade": "🎓 Which level is the student in?",
+        "ask_other_grade": "✏️ Please type the grade or level (e.g. Grade 6 & 8):",
+        "ask_c_subject": "📚 Which subject(s) does the student need help with?",
+        "ask_req": "📝 Anything else the tutor should know? (preferred time, the student's needs, etc.)\nOr tap Skip.",
+        "ask_budget": "💰 Last one! What is your monthly budget for the tutor (in ETB)?\nExample: 3000",
+        "client_done": "✅ Your request {code} is in!\n\nOur team is reviewing it and will share it with our verified tutors very soon. We'll message you here the moment it goes live.",
+        "client_approved": "🎉 Great news! Your request {code} is approved and live. Tutors can see it now, and we'll connect you with the right match soon.",
         "client_rejected": "Your request {code} was not approved. Please contact support for details.",
-        "client_matched": "✅ A tutor has been selected for your request {code}. Our team will contact you shortly.",
+        "client_matched": "✅ Good news! A tutor has been selected for your request {code}. Our team will call you shortly to arrange everything. 🤝",
         "cancelled": "Cancelled. Send /start to begin again.",
         "hint": "Please send /start to begin.",
         "error": "Something went wrong. Please try again with /start.",
         "paused": "🚧 We're not accepting new submissions right now. Please try again later.",
         "support": "Need help? {handle} | {phone}",
         "help": "ℹ️ Horizon Tutors Hub connects students with verified tutors in Adama and Bishoftu.\n\n/start - register as a tutor or request a tutor\n/cancel - cancel what you're doing\n/myapplications - your job applications (tutors)\n/help - this message\n\nTo apply for a job, tap “Apply” under the job post in our channel.",
-        "apply_card": "📌 <b>Job {code}</b>\n📚 Subject: {subject}\n🎓 Grade: {grade}\n📍 Area: {area}\n💰 Budget: {budget} ETB\n\nDo you want to apply for this job?",
+        "apply_card": "📌 <b>Job {code}</b>\n🎓 Grade: {grade}\n📚 Subject: {subject}\n📍 Area: {area}\n🕒 Schedule: {duration}\n💰 Salary: {budget}\n\nInterested? Tap Apply and we'll send your application to our team.",
         "btn_apply": "✅ Apply",
         "apply_not_registered": "To apply you must first register as a tutor. Send /start.",
         "apply_not_approved": "Your tutor registration status is: {status}. You can apply once it is approved.",
         "apply_job_closed": "Sorry, this job is no longer open.",
         "apply_already": "You have already applied for this job.",
-        "apply_done": "✅ Your application for {code} was sent. We'll notify you of the decision.",
+        "apply_done": "✅ Your application for {code} is in! We'll message you here as soon as a decision is made.",
         "apply_failed": "❌ Sorry, we couldn't save your application. Please try again later.",
-        "app_selected": "🎉 You've been selected for job {code}! Our team will contact you shortly.",
-        "app_not_selected": "Job {code} has been filled by another tutor. Thank you for applying - watch our channel for new jobs.",
+        "app_selected": "🎉 Congratulations! You've been selected for job {code}. Our team will contact you shortly with the next steps.",
+        "app_not_selected": "Thanks for applying to job {code}. Another tutor was chosen this time, but don't be discouraged! New jobs are posted in our channel regularly 💪",
         "app_rejected": "Your application for job {code} was not accepted.",
         "my_apps_header": "📋 Your applications:",
         "my_apps_empty": "You have no applications yet.",
+        "ask_grade_pick": "{section}: which grade?",
+        "ask_gender_pref": "👩‍🏫👨‍🏫 Would you prefer a male or a female tutor?",
+        "ask_days": "📅 How many days per week would you like lessons?",
+        "ask_days_text": "✏️ Type the days you'd like (e.g. weekends only):",
+        "ask_hours": "⏰ How long should each lesson be?",
+        "ask_hours_text": "✏️ Type the lesson length (e.g. 1 hour 30 minutes):",
+        "btn_skip": "⏭ Skip",
+        "btn_back": "⬅ Back",
+        "btn_type": "✏️ Other (type it)",
+        "pref_male": "👨 Male tutor",
+        "pref_female": "👩 Female tutor",
+        "pref_any": "🤝 No preference",
+        "hr_label": "{n} hr",
+        "btn_join": "📢 Join our channel",
+        "join_prompt": "📢 Join our channel so you never miss a new tutoring job or update 👇",
     },
     "am": {
-        "menu": "እንኳን ወደ ሆራይዘን ቱተርስ ሃብ በደህና መጡ! 🎓\nበአዳማ እና ቢሾፍቱ ተማሪዎችን ከተረጋገጡ አስተማሪዎች ጋር እናገናኛለን።\n\nምን ማድረግ ይፈልጋሉ?",
-        "btn_tutor": "👨‍🏫 እንደ አስተማሪ ይመዝገቡ",
-        "btn_client": "🔎 አስተማሪ ይፈልጉ",
-        "use_buttons": "እባክዎ ከላይ ካሉት አማራጮች አንዱን ይምረጡ።",
-        "ask_name": "እባክዎ ሙሉ ስምዎን ያስገቡ፦",
-        "ask_phone": "ስልክ ቁጥርዎን ለማጋራት ከታች ያለውን ቁልፍ ይጫኑ ወይም ይጻፉ (ለምሳሌ 0912345678)፦",
+        "menu": "👋 እንኳን ወደ ሆራይዘን ቱተርስ ሃብ በደህና መጡ!\n\nበአዳማ እና በቢሾፍቱ ለሚገኙ ቤተሰቦች መታወቂያቸው የተረጋገጠ ታማኝ አስተማሪዎችን እናገናኛለን። ትምህርት በቤት ውስጥ ቀላል፣ አስተማማኝ እና ከጭንቀት ነጻ እንዲሆን። 🎓\n\nዛሬ እንዴት ልንረዳዎት እንችላለን?",
+        "btn_tutor": "👨‍🏫 አስተማሪ ነኝ - ሥራ እፈልጋለሁ",
+        "btn_client": "🔎 አስተማሪ እፈልጋለሁ",
+        "use_buttons": "እባክዎ ከላይ ካሉት አማራጮች አንዱን ይጫኑ 👆",
+        "ask_name": "እንጀምር! 😊 ሙሉ ስምዎን ያስገቡ፦",
+        "ask_phone": "እናመሰግናለን! 📱 የሚደውሉበትን ስልክ ቁጥር ያጋሩ።\nከታች ያለውን ቁልፍ ይጫኑ ወይም ይጻፉ (ለምሳሌ 0912345678)።",
         "share_phone": "📱 ስልክ ቁጥሬን አጋራ",
-        "contact_not_yours": "እባክዎ በቁልፉ የራስዎን ስልክ ቁጥር ብቻ ያጋሩ።",
-        "phone_saved": "✅ ስልክ ቁጥር ተቀምጧል፦ {phone}",
-        "bad_phone": "ትክክለኛ የኢትዮጵያ ስልክ ቁጥር አይመስልም። ቁልፉን ይጫኑ ወይም እንደገና ይጻፉ (ለምሳሌ 0912345678)።",
+        "contact_not_yours": "እባክዎ በቁልፉ የራስዎን ስልክ ቁጥር ብቻ ያጋሩ 🙏",
+        "phone_saved": "✅ ተቀብለናል፦ {phone}",
+        "bad_phone": "ትክክለኛ የኢትዮጵያ ሞባይል ቁጥር አይመስልም። ቁልፉን ይጫኑ ወይም እንደ 0912345678 ብለው ይጻፉ 🙏",
         "ask_gender": "ጾታዎን ይምረጡ፦",
-        "male": "ወንድ", "female": "ሴት",
-        "ask_subject": "የሚያስተምሩት ትምህርት(ቶች) ምንድን ነው?",
-        "ask_city": "ከተማዎን ይምረጡ፦",
-        "adama": "አዳማ", "bishoftu": "ቢሾፍቱ",
-        "ask_hood": "ሰፈርዎን / አካባቢዎን ያስገቡ፦",
-        "ask_id": "እባክዎ የብሔራዊ መታወቂያዎን (የፊት ገጽ) ግልጽ ፎቶ ይላኩ።\nለተሻለ ጥራት እንደ ፋይል (File) ይላኩ።",
+        "male": "ወንድ",
+        "female": "ሴት",
+        "ask_subject": "📚 የሚያስተምሩት ትምህርት(ቶች) ምንድን ናቸው? (ለምሳሌ ሒሳብ፣ ፊዚክስ፣ እንግሊዝኛ)",
+        "ask_city": "📍 በየትኛው ከተማ ነው የሚኖሩት?",
+        "adama": "አዳማ",
+        "bishoftu": "ቢሾፍቱ",
+        "ask_hood": "🏘 የትኛው ሰፈር / አካባቢ ነው?",
+        "ask_id": "🪪 ሊጨርሱ ነው! ቤተሰቦችን ለመጠበቅ ሁሉም አስተማሪዎቻችን መታወቂያቸው ይረጋገጣል። እባክዎ የብሔራዊ መታወቂያዎን የፊት ገጽ ግልጽ ፎቶ ይላኩ።\n\n💡 ጠቃሚ ምክር፦ ጽሑፉ በግልጽ እንዲነበብ ፎቶውን እንደ ፋይል (File) ይላኩ።",
         "not_image": "እባክዎ የመታወቂያዎን ምስል (ፎቶ) ይላኩ።",
         "too_large": "ፋይሉ በጣም ትልቅ ነው። እባክዎ ከ15 ሜጋባይት በታች የሆነ ምስል ይላኩ።",
-        "blurry": "⚠️ ፎቶው ደብዛዛ ወይም ለማንበብ በጣም ትንሽ ነው። እባክዎ በጥሩ ብርሃን ቀጥ አድርገው እንደገና አንስተው ይላኩ።",
+        "blurry": "⚠️ ፎቶው ደብዛዛ ወይም ለማንበብ በጣም ትንሽ ነው። እባክዎ በጥሩ ብርሃን ቀጥ አድርገው እንደገና አንስተው ይላኩ 📸",
         "dl_failed": "ፋይሉን ማውረድ አልተቻለም። እባክዎ እንደገና ይላኩ።",
-        "processing": "⏳ በማስኬድ ላይ፣ እባክዎ ይጠብቁ…",
-        "tutor_done": "✅ እናመሰግናለን! ምዝገባዎ ተቀብለናል፤ የአስተዳዳሪ ማረጋገጫ በመጠበቅ ላይ ነው።",
+        "processing": "⏳ ትንሽ ይጠብቁ፣ መረጃዎን በማስቀመጥ ላይ ነን…",
+        "tutor_done": "🎉 እናመሰግናለን፣ ምዝገባዎ ደርሶናል!\n\nቡድናችን መረጃዎን በማረጋገጥ ላይ ነው። ሲጸድቁ እዚሁ መልዕክት እንልክልዎታለን፤ ከዚያም ለሥራዎች ማመልከት ይችላሉ።",
         "save_failed_photo": "❌ ይቅርታ፣ በቴክኒክ ችግር ምክንያት ምዝገባዎን ማስቀመጥ አልቻልንም። ምንም አልተመዘገበም። ለመድገም ፎቶውን እንደገና ይላኩ ወይም /cancel ይበሉ።",
         "save_failed_text": "❌ ይቅርታ፣ በቴክኒክ ችግር ምክንያት ጥያቄዎን ማስቀመጥ አልቻልንም። ምንም አልተመዘገበም። ለመድገም በጀትዎን እንደገና ይላኩ ወይም /cancel ይበሉ።",
-        "tutor_approved": "🎉 የአስተማሪ መገለጫዎ ተረጋግጦ ጸድቋል! አሁን በቻናላችን ላይ ባሉ ልጥፎች ስር “አመልክት” የሚለውን ቁልፍ በመጫን ለሥራዎች ማመልከት ይችላሉ።",
+        "tutor_approved": "🎉 እንኳን ደስ አለዎት፣ ተረጋግጠው ጸድቀዋል!\n\nአሁን ለሥራዎች ማመልከት ይችላሉ፤ በቻናላችን ላይ ባለ ማንኛውም የሥራ ልጥፍ ስር “አመልክት” ይጫኑ። መልካም ዕድል! 🍀",
         "tutor_rejected": "ይቅርታ፣ ምዝገባዎ አልጸደቀም። እባክዎ ድጋፍን ያነጋግሩ ወይም በግልጽ የመታወቂያ ፎቶ እንደገና ይመዝገቡ።",
-        "ask_student_grade": "የተማሪውን ክፍል / ደረጃ ይምረጡ፦",
-        "ask_other_grade": "እባክዎ ክፍሉን / ደረጃውን ይጻፉ፦",
-        "ask_c_subject": "ተማሪው በየትኛው ትምህርት(ቶች) እገዛ ይፈልጋል?",
-        "ask_req": "መስፈርቶችዎን ይግለጹ (የጊዜ ሰሌዳ፣ በሳምንት ስንት ቀን፣ የአስተማሪ ጾታ ምርጫ ወዘተ)፦",
-        "ask_budget": "ወርሃዊ በጀትዎ ስንት ነው (በብር)?",
-        "client_done": "✅ ጥያቄዎ ({code}) ተቀብለናል፤ ማረጋገጫ በመጠበቅ ላይ ነው። ከጸደቀ ለአስተማሪዎቻችን እናሳውቃለን።",
-        "client_approved": "🎉 ጥያቄዎ {code} ጸድቆ ለአስተማሪዎቻችን ተሰራጭቷል። በቅርቡ እናገናኝዎታለን።",
+        "ask_student_grade": "🎓 ተማሪው በየትኛው ደረጃ ነው?",
+        "ask_other_grade": "✏️ ክፍሉን / ደረጃውን ይጻፉ (ለምሳሌ 6ኛ እና 8ኛ ክፍል)፦",
+        "ask_c_subject": "📚 ተማሪው በየትኛው ትምህርት(ቶች) እገዛ ይፈልጋል?",
+        "ask_req": "📝 አስተማሪው ማወቅ ያለበት ሌላ ነገር አለ? (የሚመረጥ ሰዓት፣ የተማሪው ፍላጎት ወዘተ)\nከሌለ “ዝለል” ይጫኑ።",
+        "ask_budget": "💰 የመጨረሻው! ለአስተማሪው ወርሃዊ በጀትዎ ስንት ነው (በብር)?\nለምሳሌ፦ 3000",
+        "client_done": "✅ ጥያቄዎ ({code}) ደርሶናል!\n\nቡድናችን እየመረመረው ነው፤ ከዚያም ለተረጋገጡ አስተማሪዎቻችን እናሳውቃለን። ሲለቀቅ እዚሁ እናሳውቅዎታለን።",
+        "client_approved": "🎉 መልካም ዜና! ጥያቄዎ {code} ጸድቆ ተለቅቋል። አስተማሪዎች አሁን ማየት ይችላሉ፤ ተስማሚውን አስተማሪ በቅርቡ እናገናኝዎታለን።",
         "client_rejected": "ጥያቄዎ {code} አልጸደቀም። ለዝርዝር ድጋፍን ያነጋግሩ።",
-        "client_matched": "✅ ለጥያቄዎ {code} አስተማሪ ተመርጧል። ቡድናችን በቅርቡ ያነጋግርዎታል።",
+        "client_matched": "✅ መልካም ዜና! ለጥያቄዎ {code} አስተማሪ ተመርጧል። ሁሉንም ለማመቻቸት ቡድናችን በቅርቡ ይደውልልዎታል። 🤝",
         "cancelled": "ተሰርዟል። እንደገና ለመጀመር /start ይላኩ።",
         "hint": "ለመጀመር እባክዎ /start ይላኩ።",
         "error": "የሆነ ችግር ተፈጥሯል። እባክዎ በ /start እንደገና ይሞክሩ።",
         "paused": "🚧 በአሁኑ ጊዜ አዳዲስ ጥያቄዎችን አንቀበልም። እባክዎ ቆይተው ይሞክሩ።",
         "support": "እርዳታ ይፈልጋሉ? {handle} | {phone}",
         "help": "ℹ️ ሆራይዘን ቱተርስ ሃብ በአዳማ እና ቢሾፍቱ ተማሪዎችን ከተረጋገጡ አስተማሪዎች ጋር ያገናኛል።\n\n/start - እንደ አስተማሪ ለመመዝገብ ወይም አስተማሪ ለመፈለግ\n/cancel - የጀመሩትን ለመሰረዝ\n/myapplications - የእርስዎ የሥራ ማመልከቻዎች (አስተማሪዎች)\n/help - ይህ መልዕክት\n\nለሥራ ለማመልከት በቻናላችን ላይ ባለው ልጥፍ ስር “አመልክት” ይጫኑ።",
-        "apply_card": "📌 <b>ሥራ {code}</b>\n📚 ትምህርት፦ {subject}\n🎓 ክፍል፦ {grade}\n📍 አካባቢ፦ {area}\n💰 በጀት፦ {budget} ብር\n\nለዚህ ሥራ ማመልከት ይፈልጋሉ?",
+        "apply_card": "📌 <b>ሥራ {code}</b>\n🎓 ክፍል፦ {grade}\n📚 ትምህርት፦ {subject}\n📍 አካባቢ፦ {area}\n🕒 የጊዜ ሰሌዳ፦ {duration}\n💰 ደመወዝ፦ {budget}\n\nፍላጎት አለዎት? “አመልክት” ይጫኑ፤ ማመልከቻዎን ለቡድናችን እንልካለን።",
         "btn_apply": "✅ አመልክት",
         "apply_not_registered": "ለማመልከት መጀመሪያ እንደ አስተማሪ መመዝገብ አለብዎት። /start ይላኩ።",
         "apply_not_approved": "የምዝገባዎ ሁኔታ፦ {status}። ከጸደቀ በኋላ ማመልከት ይችላሉ።",
         "apply_job_closed": "ይቅርታ፣ ይህ ሥራ አሁን ክፍት አይደለም።",
         "apply_already": "ለዚህ ሥራ ቀድሞ አመልክተዋል።",
-        "apply_done": "✅ ለ{code} ማመልከቻዎ ተልኳል። ውሳኔውን እናሳውቅዎታለን።",
+        "apply_done": "✅ ለ{code} ማመልከቻዎ ደርሶናል! ውሳኔ እንደተሰጠ እዚሁ እናሳውቅዎታለን።",
         "apply_failed": "❌ ይቅርታ፣ ማመልከቻዎን ማስቀመጥ አልተቻለም። እባክዎ ቆይተው ይሞክሩ።",
-        "app_selected": "🎉 ለሥራ {code} ተመርጠዋል! ቡድናችን በቅርቡ ያነጋግርዎታል።",
-        "app_not_selected": "ሥራ {code} በሌላ አስተማሪ ተሞልቷል። ስላመለከቱ እናመሰግናለን፤ አዳዲስ ሥራዎችን በቻናሉ ይከታተሉ።",
+        "app_selected": "🎉 እንኳን ደስ አለዎት! ለሥራ {code} ተመርጠዋል። ቀጣዩን ሂደት ለማሳወቅ ቡድናችን በቅርቡ ያነጋግርዎታል።",
+        "app_not_selected": "ለሥራ {code} ስላመለከቱ እናመሰግናለን። በዚህ ጊዜ ሌላ አስተማሪ ተመርጧል፤ ግን አይሸነፉ! አዳዲስ ሥራዎች በቻናላችን በየጊዜው ይለቀቃሉ 💪",
         "app_rejected": "ለሥራ {code} ያቀረቡት ማመልከቻ አልተቀበለም።",
         "my_apps_header": "📋 የእርስዎ ማመልከቻዎች፦",
         "my_apps_empty": "እስካሁን ምንም ማመልከቻ የለም።",
+        "ask_grade_pick": "{section} - የትኛው ክፍል ነው?",
+        "ask_gender_pref": "👩‍🏫👨‍🏫 ወንድ ወይስ ሴት አስተማሪ ይመርጣሉ?",
+        "ask_days": "📅 በሳምንት ስንት ቀን ትምህርት እንዲሰጥ ይፈልጋሉ?",
+        "ask_days_text": "✏️ የሚፈልጓቸውን ቀናት ይጻፉ (ለምሳሌ ቅዳሜና እሁድ ብቻ)፦",
+        "ask_hours": "⏰ እያንዳንዱ ትምህርት ስንት ሰዓት ይሁን?",
+        "ask_hours_text": "✏️ የትምህርቱን ርዝመት ይጻፉ (ለምሳሌ አንድ ሰዓት ተኩል)፦",
+        "btn_skip": "⏭ ዝለል",
+        "btn_back": "⬅ ተመለስ",
+        "btn_type": "✏️ ሌላ (ራሴ ልጻፍ)",
+        "pref_male": "👨 ወንድ አስተማሪ",
+        "pref_female": "👩 ሴት አስተማሪ",
+        "pref_any": "🤝 ምርጫ የለኝም",
+        "hr_label": "{n} ሰዓት",
+        "btn_join": "📢 ቻናላችንን ይቀላቀሉ",
+        "join_prompt": "📢 አዳዲስ የትምህርት ሥራዎችና መረጃዎች እንዳያመልጥዎ ቻናላችንን ይቀላቀሉ 👇",
     },
 }
 
@@ -1093,9 +1131,77 @@ def city_keyboard(context):
 
 
 def grade_keyboard(context):
+    """Step 1 of the grade picker: KG / Primary / High School (+ University, + type it)."""
     idx = 2 if lang_of(context) == "am" else 1
-    buttons = [InlineKeyboardButton(opt[idx], callback_data=f"grade:{opt[0]}") for opt in GRADE_OPTIONS]
-    return InlineKeyboardMarkup([buttons[i:i + 2] for i in range(0, len(buttons), 2)])
+    rows = [[InlineKeyboardButton(s[idx], callback_data=f"gsec:{s[0]}")] for s in GRADE_SECTIONS]
+    rows.append([InlineKeyboardButton(UNI_GRADE[idx], callback_data="grade:UNI")])
+    rows.append([InlineKeyboardButton(tr(context, "btn_type"), callback_data="gsec:TYPE")])
+    return InlineKeyboardMarkup(rows)
+
+
+def grade_pick_keyboard(context, sec_key: str):
+    """Step 2: the individual grades inside the chosen section."""
+    idx = 2 if lang_of(context) == "am" else 1
+    sec = next(s for s in GRADE_SECTIONS if s[0] == sec_key)
+    buttons = [InlineKeyboardButton(g[idx], callback_data=f"grade:{g[0]}") for g in sec[3]]
+    rows = [buttons[i:i + 3] for i in range(0, len(buttons), 3)]
+    rows.append([InlineKeyboardButton(tr(context, "btn_back"), callback_data="gsec:BACK")])
+    return InlineKeyboardMarkup(rows)
+
+
+def gpref_keyboard(context):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(tr(context, "pref_male"), callback_data="gpref:Male"),
+         InlineKeyboardButton(tr(context, "pref_female"), callback_data="gpref:Female")],
+        [InlineKeyboardButton(tr(context, "pref_any"), callback_data="gpref:Any")],
+    ])
+
+
+def days_keyboard(context):
+    nums = [InlineKeyboardButton(str(n), callback_data=f"days:{n}") for n in range(1, 8)]
+    return InlineKeyboardMarkup([nums[:4], nums[4:],
+                                 [InlineKeyboardButton(tr(context, "btn_type"), callback_data="days:TYPE")]])
+
+
+def hours_keyboard(context):
+    vals = ["1", "1.5", "2", "3"]
+    row = [InlineKeyboardButton(tr(context, "hr_label", n=v), callback_data=f"hrs:{v}") for v in vals]
+    return InlineKeyboardMarkup([row[:2], row[2:],
+                                 [InlineKeyboardButton(tr(context, "btn_type"), callback_data="hrs:TYPE")]])
+
+
+def skip_keyboard(context):
+    return InlineKeyboardMarkup([[InlineKeyboardButton(tr(context, "btn_skip"), callback_data="skip:req")]])
+
+
+def join_markup(lang: str):
+    return InlineKeyboardMarkup([[InlineKeyboardButton(tr_lang(lang, "btn_join"), url=CHANNEL_LINK)]])
+
+
+async def send_join_prompt(message, lang: str):
+    """Asked at the end of every flow (tutor registration, client request, job application)."""
+    try:
+        await message.reply_text(tr_lang(lang, "join_prompt"), reply_markup=join_markup(lang))
+    except Exception:
+        logger.exception("Could not send the join-channel prompt")
+
+
+def fmt_budget(b) -> str:
+    b = clean(str(b or ""), 60)
+    if re.fullmatch(r"\d[\d,\s]*", b):
+        return f"{int(digits(b)):,} ETB"
+    if not b or re.search(r"etb|birr|ብር", b, re.I):
+        return b
+    return f"{b} ETB"
+
+
+def duration_text(days, hours) -> str:
+    d, h = str(days or "").strip(), str(hours or "").strip()
+    if d.isdigit():
+        d = f"{d} {'day' if d == '1' else 'days'}/week"
+    if re.fullmatch(r"\d+(\.\d+)?", h):
+        h = f"{h} {'hour' if h == '1' else 'hours'}/day"
+    return " · ".join(x for x in (d, h) if x)
 
 
 def phone_keyboard(context):
@@ -1128,7 +1234,8 @@ def _is_admin_user(update: Update) -> bool:
 # --------------------------------------------------------------------------- #
 (LANG, MENU,
  T_NAME, T_PHONE, T_GENDER, T_SUBJECT, T_CITY, T_HOOD, T_ID,
- C_NAME, C_PHONE, C_GRADE, C_GRADE_TEXT, C_SUBJECT, C_CITY, C_HOOD, C_REQ, C_BUDGET) = range(18)
+ C_NAME, C_PHONE, C_GRADE, C_GRADE_TEXT, C_SUBJECT, C_CITY, C_HOOD, C_REQ, C_BUDGET,
+ C_GRADE_PICK, C_GENDER, C_DAYS, C_DAYS_TEXT, C_HOURS, C_HOURS_TEXT) = range(24)
 
 PRIVATE = filters.ChatType.PRIVATE
 TEXT_ONLY = filters.TEXT & ~filters.COMMAND & PRIVATE
@@ -1243,17 +1350,81 @@ def choice_step(field, next_state, prompt_key, markup_fn=None):
     return handler
 
 
-async def grade_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def _drop_buttons(q):
+    try:
+        await q.edit_message_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+
+async def grade_section(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
+    await _drop_buttons(q)
     key = q.data.split(":", 1)[1]
-    if key == "OTHER":
+    if key == "TYPE":
         await q.message.reply_text(tr(context, "ask_other_grade"))
         return C_GRADE_TEXT
-    label = next((o[1] for o in GRADE_OPTIONS if o[0] == key), key)
+    sec = next(s for s in GRADE_SECTIONS if s[0] == key)
+    label = sec[2] if lang_of(context) == "am" else sec[1]
+    await q.message.reply_text(tr(context, "ask_grade_pick", section=label),
+                               reply_markup=grade_pick_keyboard(context, key))
+    return C_GRADE_PICK
+
+
+async def grade_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    await _drop_buttons(q)
+    await q.message.reply_text(tr(context, "ask_student_grade"), reply_markup=grade_keyboard(context))
+    return C_GRADE
+
+
+async def grade_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    label = GRADE_LABELS.get(q.data.split(":", 1)[1])
+    if not label:
+        return None
+    await _drop_buttons(q)
     context.user_data["grade"] = label
     await q.message.reply_text(tr(context, "ask_c_subject"))
     return C_SUBJECT
+
+
+async def days_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    await _drop_buttons(q)
+    val = q.data.split(":", 1)[1]
+    if val == "TYPE":
+        await q.message.reply_text(tr(context, "ask_days_text"))
+        return C_DAYS_TEXT
+    context.user_data["days"] = val
+    await q.message.reply_text(tr(context, "ask_hours"), reply_markup=hours_keyboard(context))
+    return C_HOURS
+
+
+async def hours_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    await _drop_buttons(q)
+    val = q.data.split(":", 1)[1]
+    if val == "TYPE":
+        await q.message.reply_text(tr(context, "ask_hours_text"))
+        return C_HOURS_TEXT
+    context.user_data["hours"] = val
+    await q.message.reply_text(tr(context, "ask_req"), reply_markup=skip_keyboard(context))
+    return C_REQ
+
+
+async def req_skip(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    await _drop_buttons(q)
+    context.user_data["req"] = ""
+    await q.message.reply_text(tr(context, "ask_budget"))
+    return C_BUDGET
 
 
 # --------------------------------------------------------------------------- #
@@ -1368,6 +1539,7 @@ async def tutor_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 logger.error("ADMIN NEVER NOTIFIED about tutor %s - approve manually in the sheet.", code)
 
         await msg.reply_text(await with_support(lang_of(context), tr(context, "tutor_done")))
+        await send_join_prompt(msg, lang_of(context))
         ud.clear()
         return ConversationHandler.END
     finally:
@@ -1410,15 +1582,15 @@ async def client_budget(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Grade": ud["grade"],
             "City": ud["city"],
             "Place": ud["hood"],
-            "Tutor Gender Pref": "Any",
-            "Duration": "1 Month",
+            "Tutor Gender Pref": ud.get("gpref", "Any"),
+            "Duration": duration_text(ud.get("days"), ud.get("hours")),
             "Budget": budget,
             "Budget Number": "".join(filter(str.isdigit, budget)) or "0",
             "Commission Terms": settings.get("commission_rate", "50%"),
             "Verification": "Pending",
             "Job Status": "Open",
             "Channel Msg ID": "",
-            "Requirements": ud["req"],
+            "Requirements": ud.get("req", ""),
             "Language": lang_of(context),
         }
         try:
@@ -1436,8 +1608,10 @@ async def client_budget(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🎓 Student grade: {esc(ud['grade'])}\n"
             f"📚 Subject: {esc(ud['subject'])}\n"
             f"📍 {esc(ud['hood'])}, {esc(ud['city'])}\n"
-            f"💰 Budget: {esc(budget)} ETB\n"
-            f"📝 {esc(ud['req'])}\n"
+            f"👩‍🏫 Tutor preference: {esc(ud.get('gpref', 'Any'))}\n"
+            f"🕒 Schedule: {esc(duration_text(ud.get('days'), ud.get('hours')))}\n"
+            f"💰 Budget: {esc(fmt_budget(budget))}\n"
+            f"📝 {esc(ud.get('req') or '-')}\n"
             f"Telegram: {mention(user)}"
         )
         buttons = InlineKeyboardMarkup([[
@@ -1449,6 +1623,7 @@ async def client_budget(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error("ADMIN NEVER NOTIFIED about client request %s - approve manually in the sheet.", code)
 
         await update.message.reply_text(await with_support(lang_of(context), tr(context, "client_done", code=code)))
+        await send_join_prompt(update.message, lang_of(context))
         ud.clear()
         return ConversationHandler.END
     finally:
@@ -1475,22 +1650,33 @@ async def _mark_admin_message(q, suffix: str):
 
 
 def _channel_post(data: dict, code: str, bot_username: str, filled: bool = False):
-    text = (
-        f"📢 <b>NEW TUTOR JOB {esc(code)}</b>\n\n"
-        f"📚 Subject / ትምህርት: {esc(data.get('Subject', ''))}\n"
-        f"🎓 Grade / ክፍል: {esc(data.get('Grade', ''))}\n"
-        f"📍 Area / አካባቢ: {esc(data.get('Place', ''))}, {esc(data.get('City', ''))}\n"
-        f"💰 Budget / በጀት: {esc(data.get('Budget', ''))} ETB"
-    )
-    if data.get("Requirements"):
-        text += f"\n📝 Details / ዝርዝር: {esc(data['Requirements'])}"
+    """Job post for the channel. 🟢 OPEN while looking for a tutor, 🔴 CLOSED once a tutor is matched."""
+    pref = (data.get("Tutor Gender Pref") or "").strip().lower()
+    title = {"male": "Male Tutor", "female": "Female Tutor"}.get(pref, "Tutor Needed")
+    status = "🔴 <b>CLOSED · ተዘግቷል</b>" if filled else "🟢 <b>OPEN · ክፍት</b>"
+    lines = [status, "", f"📖 <b>{title}</b> 📖", "", f"Job code: {esc(code)}", ""]
+    fields = [
+        ("Grade", data.get("Grade")),
+        ("City", data.get("City")),
+        ("Place", data.get("Place")),
+        ("Subject", data.get("Subject")),
+        ("Duration", data.get("Duration")),
+        ("Salary (per month)", fmt_budget(data.get("Budget"))),
+    ]
+    for label, value in fields:
+        if value:
+            lines.append(f"✅ {label} : {esc(value)}")
+    note = (data.get("Requirements") or "").strip() or "We need a highly committed, punctual and talented tutor"
+    lines += ["", f"📖 {esc(note)}"]
     if filled:
-        return text + "\n\n✅ <b>FILLED / ተሞልቷል</b>", None
+        lines += ["", "✅ This job has been filled and a tutor has been matched. "
+                      "Watch the channel for new jobs! / ይህ ሥራ ተሞልቷል።"]
+        return "\n".join(lines), None
     payload = code.lstrip("#")
     markup = InlineKeyboardMarkup([[
-        InlineKeyboardButton("📩 Apply / ያመልክቱ", url=f"https://t.me/{bot_username}?start=apply_{payload}")
+        InlineKeyboardButton("📩 Apply Now / ያመልክቱ", url=f"https://t.me/{bot_username}?start=apply_{payload}")
     ]])
-    return text, markup
+    return "\n".join(lines), markup
 
 
 async def admin_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1594,7 +1780,8 @@ async def apply_intro(update: Update, context: ContextTypes.DEFAULT_TYPE, code: 
     text = tr_lang(lang, "apply_card", code=esc(code), subject=esc(job.get("Subject", "")),
                    grade=esc(job.get("Grade", "")),
                    area=esc(f"{job.get('Place', '')}, {job.get('City', '')}"),
-                   budget=esc(job.get("Budget", "")))
+                   duration=esc(job.get("Duration") or "-"),
+                   budget=esc(fmt_budget(job.get("Budget", ""))))
     markup = InlineKeyboardMarkup([[
         InlineKeyboardButton(tr_lang(lang, "btn_apply"), callback_data=f"apply:{code.lstrip('#')}")]])
     await msg.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
@@ -1655,11 +1842,12 @@ async def apply_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
     await q.message.reply_text(tr_lang(lang, "apply_done", code=code))
+    await send_join_prompt(q.message, lang)
 
     job = res["job"]
     app = dict(res["app"])
     header = (f"📌 <b>{esc(code)}</b> · {esc(job.get('Subject', ''))} · {esc(job.get('Grade', ''))} · "
-              f"{esc(job.get('Place', ''))}, {esc(job.get('City', ''))} · {esc(job.get('Budget', ''))} ETB\n\n")
+              f"{esc(job.get('Place', ''))}, {esc(job.get('City', ''))} · {esc(fmt_budget(job.get('Budget', '')))}\n\n")
     sent = await notify_admin(context, header + app_card(app, res["tutor"]), parse_mode=ParseMode.HTML,
                               reply_markup=app_buttons(app, res["tutor"]))
     if sent is None:
@@ -2047,20 +2235,38 @@ def build_application() -> Application:
                 MessageHandler(filters.ALL & ~filters.COMMAND & PRIVATE, tutor_id_wrong),
             ],
 
-            # ---- client: name -> phone -> grade (buttons) -> subject -> city -> area -> needs -> budget ----
+            # ---- client: name -> phone -> grade (section > grade) -> subject -> city -> area
+            #      -> tutor gender -> days/week -> hours -> notes (skippable) -> budget ----
             C_NAME: [MessageHandler(TEXT_ONLY, text_step(C_NAME, "name", C_PHONE, "ask_phone",
                                                          markup_fn=phone_keyboard))],
             C_PHONE: [MessageHandler(CONTACT_OR_TEXT, phone_step(C_PHONE, C_GRADE, "ask_student_grade", grade_keyboard))],
-            C_GRADE: [CallbackQueryHandler(grade_choice, pattern=r"^grade:[A-Za-z0-9\-]+$"),
+            C_GRADE: [CallbackQueryHandler(grade_section, pattern=r"^gsec:(KG|PRI|HS|TYPE)$"),
+                      CallbackQueryHandler(grade_pick, pattern=r"^grade:UNI$"),
                       MessageHandler(TEXT_ONLY, use_buttons(C_GRADE))],
+            C_GRADE_PICK: [CallbackQueryHandler(grade_pick, pattern=r"^grade:[A-Z0-9]+$"),
+                           CallbackQueryHandler(grade_back, pattern=r"^gsec:BACK$"),
+                           MessageHandler(TEXT_ONLY, use_buttons(C_GRADE_PICK))],
             C_GRADE_TEXT: [MessageHandler(TEXT_ONLY, text_step(C_GRADE_TEXT, "grade", C_SUBJECT, "ask_c_subject"))],
             C_SUBJECT: [MessageHandler(TEXT_ONLY, text_step(C_SUBJECT, "subject", C_CITY, "ask_city",
                                                             markup_fn=city_keyboard))],
             C_CITY: [CallbackQueryHandler(choice_step("city", C_HOOD, "ask_hood"),
                                           pattern=r"^city:(Adama|Bishoftu)$"),
                      MessageHandler(TEXT_ONLY, use_buttons(C_CITY))],
-            C_HOOD: [MessageHandler(TEXT_ONLY, text_step(C_HOOD, "hood", C_REQ, "ask_req"))],
-            C_REQ: [MessageHandler(TEXT_ONLY, text_step(C_REQ, "req", C_BUDGET, "ask_budget", maxlen=600))],
+            C_HOOD: [MessageHandler(TEXT_ONLY, text_step(C_HOOD, "hood", C_GENDER, "ask_gender_pref",
+                                                         markup_fn=gpref_keyboard))],
+            C_GENDER: [CallbackQueryHandler(choice_step("gpref", C_DAYS, "ask_days", days_keyboard),
+                                            pattern=r"^gpref:(Male|Female|Any)$"),
+                       MessageHandler(TEXT_ONLY, use_buttons(C_GENDER))],
+            C_DAYS: [CallbackQueryHandler(days_choice, pattern=r"^days:([1-7]|TYPE)$"),
+                     MessageHandler(TEXT_ONLY, use_buttons(C_DAYS))],
+            C_DAYS_TEXT: [MessageHandler(TEXT_ONLY, text_step(C_DAYS_TEXT, "days", C_HOURS, "ask_hours",
+                                                              maxlen=40, markup_fn=hours_keyboard))],
+            C_HOURS: [CallbackQueryHandler(hours_choice, pattern=r"^hrs:(1|1\.5|2|3|TYPE)$"),
+                      MessageHandler(TEXT_ONLY, use_buttons(C_HOURS))],
+            C_HOURS_TEXT: [MessageHandler(TEXT_ONLY, text_step(C_HOURS_TEXT, "hours", C_REQ, "ask_req",
+                                                               maxlen=40, markup_fn=skip_keyboard))],
+            C_REQ: [CallbackQueryHandler(req_skip, pattern=r"^skip:req$"),
+                    MessageHandler(TEXT_ONLY, text_step(C_REQ, "req", C_BUDGET, "ask_budget", maxlen=600))],
             C_BUDGET: [MessageHandler(TEXT_ONLY, client_budget)],
         },
         fallbacks=[

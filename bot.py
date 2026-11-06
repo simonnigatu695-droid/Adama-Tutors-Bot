@@ -254,7 +254,7 @@ APPLICATION_HEADERS = [
 SETTINGS_HEADERS = ["Key", "Value", "Description"]
 
 TABS = {
-    "Tutors": {"headers": TUTOR_HEADERS, "code": "Timestamp"},
+    "Tutors": {"headers": TUTOR_HEADERS, "code": "Telegram ID"},
     "Client_Requests": {"headers": CLIENT_HEADERS, "code": "Job Code"},
     "Matches": {"headers": MATCH_HEADERS},
     "Applications": {"headers": APPLICATION_HEADERS},
@@ -383,7 +383,24 @@ def set_cells(tab: str, row_no: int, updates: dict):
 
 @sheets_guard("Record lookup")
 def find_record(tab: str, code: str):
-    """Returns (row_number, {header: value}) or None. Only for Tutors / Client_Requests."""
+    """Returns (row_number, {header: value}) or None. Only for Tutors / Client_Requests.
+
+    Tutors are keyed by Telegram ID (digits only, so Sheets text/number formatting can't break it).
+    If a tutor registered more than once, the LATEST row wins. Old admin buttons that still carry a
+    Timestamp (non-numeric) fall back to a Timestamp match so they keep working after this change.
+    """
+    if tab == "Tutors":
+        rows = read_rows(tab)
+        if re.fullmatch(r"\d+", str(code or "").strip()):
+            tid, best = str(code).strip(), None
+            for row_no, d in rows:
+                if digits(d.get("Telegram ID")) == tid:
+                    best = (row_no, d)
+            return best
+        for row_no, d in rows:  # legacy Timestamp key
+            if d.get("Timestamp") == code:
+                return row_no, d
+        return None
     code_header = TABS[tab]["code"]
     for row_no, d in read_rows(tab):
         if d.get(code_header) == code:
@@ -393,11 +410,11 @@ def find_record(tab: str, code: str):
 
 @sheets_guard("Job code generation")
 def append_with_code(tab: str, data: dict):
-    """Tutors: code = Timestamp (made unique). Client_Requests: sequential #HRZ-0001 from Settings.job_counter."""
+    """Tutors: code = Telegram ID (digits only; not forced unique, latest row wins). Client_Requests: sequential #HRZ-0001 from Settings.job_counter."""
     code_header = TABS[tab]["code"]
     ws = get_worksheet(tab)
     headers = _read_headers(ws, tab)
-    existing = set(ws.col_values(headers.index(code_header) + 1))
+    existing = set(ws.col_values(headers.index(code_header) + 1)) if tab == "Client_Requests" else set()
     counter_n = None
 
     if tab == "Client_Requests":
@@ -420,11 +437,9 @@ def append_with_code(tab: str, data: dict):
         code = f"#{JOB_PREFIX}-{n:04d}"
         counter_n = (sws, counter_row, vcol, n)
     else:
-        base = str(data.get("Timestamp") or now_str())
-        code, k = base, 2
-        while code in existing:
-            code = f"{base}-{k}"
-            k += 1
+        code = digits(data.get("Telegram ID"))
+        if not code:
+            raise BusinessError("Tutor record needs a Telegram ID.")
 
     row_data = dict(data)
     row_data[code_header] = code
@@ -639,6 +654,16 @@ def search_rows(tab: str, query: str):
         if ok:
             out.append((row_no, d))
     out.reverse()  # newest first
+    if tab == "Tutors":
+        seen, deduped = set(), []
+        for row_no, d in out:  # keep only the latest row per Telegram ID (matches find_record)
+            t = digits(d.get("Telegram ID"))
+            if t:
+                if t in seen:
+                    continue
+                seen.add(t)
+            deduped.append((row_no, d))
+        out = deduped
     if tab == "Tutors" and out:
         by_tid = {}
         try:
@@ -1809,9 +1834,9 @@ def app_buttons(app: dict, tutor=None):
             InlineKeyboardButton("✅ Select tutor", callback_data=f"aS:{code}:{tid}"),
             InlineKeyboardButton("❌ Reject", callback_data=f"aR:{code}:{tid}"),
         ])
-    ts = (tutor or {}).get("Timestamp")
-    if ts:
-        rows.append([InlineKeyboardButton("🪪 Tutor record + ID", callback_data=f"tv:{ts}")])
+    tutor_tid = digits((tutor or {}).get("Telegram ID")) or digits(app.get("Tutor Telegram"))
+    if tutor_tid:
+        rows.append([InlineKeyboardButton("🪪 Tutor record + ID", callback_data=f"tv:{tutor_tid}")])
     return InlineKeyboardMarkup(rows) if rows else None
 
 
@@ -1969,7 +1994,7 @@ def full_card(tab: str, d: dict) -> str:
 def record_buttons(tab: str, d: dict):
     rows = []
     if tab == "Tutors":
-        code = d.get("Timestamp", "")
+        code = digits(d.get("Telegram ID"))
         if (d.get("Status") or "").strip().lower() == "pending" and code:
             rows.append([InlineKeyboardButton("✅ Approve", callback_data=f"tA:{code}"),
                          InlineKeyboardButton("❌ Reject", callback_data=f"tR:{code}")])
@@ -2048,7 +2073,7 @@ async def run_search(context, chat_id: int, tab: str, query: str):
     for _, d in results[:8]:
         if tab == "Tutors":
             label = f"{d.get('Name', '')} · {d.get('Phone', '')} · {d.get('Status', '')}"
-            cb = f"tv:{d.get('Timestamp', '')}"
+            cb = f"tv:{digits(d.get('Telegram ID'))}"
         else:
             label = f"{d.get('Job Code', '')} · {d.get('Client Name', '')} · {d.get('Verification', '')}"
             cb = f"cv:{d.get('Job Code', '').lstrip('#')}"

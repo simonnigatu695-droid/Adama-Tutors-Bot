@@ -254,11 +254,11 @@ APPLICATION_HEADERS = [
 SETTINGS_HEADERS = ["Key", "Value", "Description"]
 
 TABS = {
-    "Tutors": {"headers": TUTOR_HEADERS, "code": "Telegram ID"},
-    "Client_Requests": {"headers": CLIENT_HEADERS, "code": "Job Code"},
-    "Matches": {"headers": MATCH_HEADERS},
-    "Applications": {"headers": APPLICATION_HEADERS},
-    "Settings": {"headers": SETTINGS_HEADERS},
+    "Tutors": {"headers": TUTOR_HEADERS, "code": "Telegram ID", "verify": "Telegram ID"},
+    "Client_Requests": {"headers": CLIENT_HEADERS, "code": "Job Code", "verify": "Job Code"},
+    "Matches": {"headers": MATCH_HEADERS, "verify": "Logged Date"},
+    "Applications": {"headers": APPLICATION_HEADERS, "verify": "Timestamp"},
+    "Settings": {"headers": SETTINGS_HEADERS, "verify": "Key"},
 }
 
 SETTINGS_DEFAULTS = {
@@ -358,15 +358,55 @@ def read_rows(tab: str):
     return rows
 
 
+# One writer at a time: the bot handles several users in parallel threads, and two threads that both
+# compute "the next free row" at the same moment would write into the SAME row (= overwrite).
+_SHEET_WRITE_LOCK = threading.RLock()
+
+
+def _row_from(headers: list, data: dict) -> list:
+    return [str(data.get(h, "")) for h in headers]
+
+
+def _next_free_row(ws) -> int:
+    """1-based number of the first row below the LAST row that contains any data."""
+    last = 1
+    for i, r in enumerate(ws.get_all_values(), start=1):
+        if any(str(c).strip() for c in r):
+            last = i
+    return last + 1
+
+
+def write_row_safe(ws, headers: list, row: list, verify_header=None) -> str:
+    """Write one row into the first empty row below the existing data.
+
+    Deliberately does NOT use Google's "append" (its table detection can pick the wrong spot and
+    overwrite the previous record). The target row is computed from the real sheet contents, and the
+    write is read back and verified, so an overwrite can never go unnoticed.
+    """
+    with _SHEET_WRITE_LOCK:
+        target = _next_free_row(ws)
+        if target > ws.row_count:
+            ws.add_rows(target - ws.row_count + 50)
+        ws.update(values=[row], range_name=f"A{target}", value_input_option="RAW")
+        if verify_header and verify_header in headers:
+            idx = headers.index(verify_header)
+            got = ws.row_values(target)
+            if idx >= len(got) or str(got[idx]).strip() != str(row[idx]).strip():
+                raise SheetsError(
+                    f"Write verification FAILED on '{ws.title}' row {target}: expected "
+                    f"{verify_header}={row[idx]!r} but the sheet shows "
+                    f"{(got[idx] if idx < len(got) else '')!r}. Something else is writing to this sheet "
+                    "(Apps Script, another tool, or manual edits).")
+        where = f"{ws.title}!A{target}"
+        logger.info("Row written OK | %s", where)
+        return where
+
+
 @sheets_guard("Sheets append")
 def append_dict(tab: str, data: dict):
     ws = get_worksheet(tab)
     headers = _read_headers(ws, tab)
-    row = [str(data.get(h, "")) for h in headers]
-    resp = ws.append_row(row, value_input_option="RAW")
-    updated = (resp or {}).get("updates", {}).get("updatedRange", "?")
-    logger.info("Sheets append OK | tab=%s | range=%s", tab, updated)
-    return updated
+    return write_row_safe(ws, headers, _row_from(headers, data), TABS[tab].get("verify"))
 
 
 @sheets_guard("Cell update")
@@ -410,55 +450,69 @@ def find_record(tab: str, code: str):
 
 @sheets_guard("Job code generation")
 def append_with_code(tab: str, data: dict):
-    """Tutors: code = Telegram ID (digits only; not forced unique, latest row wins). Client_Requests: sequential #HRZ-0001 from Settings.job_counter."""
-    code_header = TABS[tab]["code"]
-    ws = get_worksheet(tab)
-    headers = _read_headers(ws, tab)
-    existing = set(ws.col_values(headers.index(code_header) + 1)) if tab == "Client_Requests" else set()
-    counter_n = None
+    """Tutors: code = Telegram ID (digits only; not forced unique, latest row wins).
+    Client_Requests: sequential #HRZ-0001, #HRZ-0002 ... from Settings.job_counter (never random).
 
-    if tab == "Client_Requests":
-        sws = get_worksheet("Settings")
-        svals = sws.get_all_values()
-        shead = svals[0] if svals else SETTINGS_HEADERS
-        kcol = shead.index("Key") if "Key" in shead else 0
-        vcol = shead.index("Value") if "Value" in shead else 1
-        counter_row = None
-        n = 0
-        for i, r in enumerate(svals[1:], start=2):
-            r = r + [""] * (max(kcol, vcol) + 1 - len(r))
-            if r[kcol].strip().lower() == "job_counter":
-                counter_row = i
-                n = int(digits(r[vcol]) or 0)
-                break
-        n += 1
-        while f"#{JOB_PREFIX}-{n:04d}" in existing:
-            n += 1
-        code = f"#{JOB_PREFIX}-{n:04d}"
-        counter_n = (sws, counter_row, vcol, n)
-    else:
-        code = digits(data.get("Telegram ID"))
-        if not code:
-            raise BusinessError("Tutor record needs a Telegram ID.")
+    The next number is max(job_counter, highest job number already in the sheet) + 1, so a reset or
+    hand-edited counter can never produce a duplicate code. The whole read-number -> write-row ->
+    bump-counter sequence runs under one lock, so two clients submitting at once get different codes.
+    """
+    with _SHEET_WRITE_LOCK:
+        code_header = TABS[tab]["code"]
+        ws = get_worksheet(tab)
+        headers = _read_headers(ws, tab)
+        counter_n = None
 
-    row_data = dict(data)
-    row_data[code_header] = code
-    row = [str(row_data.get(h, "")) for h in headers]
-    resp = ws.append_row(row, value_input_option="RAW")
-    updated = (resp or {}).get("updates", {}).get("updatedRange", "?")
-    logger.info("Sheets append OK | tab=%s | code=%s | range=%s", tab, code, updated)
+        if tab == "Client_Requests":
+            pat = re.compile(rf"^#?{re.escape(JOB_PREFIX)}-(\d+)$", re.I)
+            highest = 0
+            for v in ws.col_values(headers.index(code_header) + 1):
+                m = pat.match(str(v).strip())
+                if m:
+                    highest = max(highest, int(m.group(1)))
+            sws = get_worksheet("Settings")
+            svals = sws.get_all_values()
+            shead = svals[0] if svals else SETTINGS_HEADERS
+            kcol = shead.index("Key") if "Key" in shead else 0
+            vcol = shead.index("Value") if "Value" in shead else 1
+            counter_row = None
+            n = 0
+            for i, r in enumerate(svals[1:], start=2):
+                r = r + [""] * (max(kcol, vcol) + 1 - len(r))
+                if r[kcol].strip().lower() == "job_counter":
+                    counter_row = i
+                    n = int(digits(r[vcol]) or 0)
+                    break
+            if highest > n:
+                logger.warning("job_counter (%s) is behind the sheet (highest job %s) - continuing after %s.",
+                               n, highest, highest)
+            n = max(n, highest) + 1
+            code = f"#{JOB_PREFIX}-{n:04d}"
+            counter_n = (sws, counter_row, vcol, n, shead)
+        else:
+            code = digits(data.get("Telegram ID"))
+            if not code:
+                raise BusinessError("Tutor record needs a Telegram ID.")
 
-    if counter_n:
-        sws, counter_row, vcol, n = counter_n
-        try:
-            if counter_row:
-                sws.update_cell(counter_row, vcol + 1, n)
-            else:
-                sws.append_row(["job_counter", n, SETTINGS_DEFAULTS["job_counter"][1]], value_input_option="RAW")
-            invalidate_settings()
-        except Exception:
-            logger.exception("job_counter update failed (job %s saved; uniqueness is still enforced)", code)
-    return code, updated
+        row_data = dict(data)
+        row_data[code_header] = code
+        updated = write_row_safe(ws, headers, _row_from(headers, row_data), TABS[tab].get("verify"))
+        logger.info("Record saved | tab=%s | code=%s | %s", tab, code, updated)
+
+        if counter_n:
+            sws, counter_row, vcol, n, shead_ = counter_n
+            try:
+                if counter_row:
+                    sws.update_cell(counter_row, vcol + 1, n)
+                else:
+                    write_row_safe(sws, shead_, _row_from(shead_, {
+                        "Key": "job_counter", "Value": n,
+                        "Description": SETTINGS_DEFAULTS["job_counter"][1]}), "Key")
+                invalidate_settings()
+            except Exception:
+                logger.exception("job_counter update failed (job %s saved; the next code is still "
+                                 "derived from the highest job number in the sheet)", code)
+        return code, updated
 
 
 def set_status(tab: str, row_no: int, status: str):
@@ -856,7 +910,9 @@ def run_startup_checks() -> list:
             have = {k.lower() for k in current}
             for key, (val, desc) in SETTINGS_DEFAULTS.items():
                 if key.lower() not in have:
-                    ss.worksheet("Settings").append_row([key, val, desc], value_input_option="RAW")
+                    sws_ = ss.worksheet("Settings")
+                    sh_ = sws_.row_values(1)
+                    write_row_safe(sws_, sh_, _row_from(sh_, {"Key": key, "Value": val, "Description": desc}), "Key")
                     logger.warning("Settings key '%s' was missing - added default '%s'.", key, val)
         except Exception as e:
             problems.append(f"Settings check failed: {e}")
@@ -933,6 +989,13 @@ TEXT = {
         "male": "Male",
         "female": "Female",
         "ask_subject": "📚 Which subject(s) do you teach? (e.g. Math, Physics, English)",
+        "ask_t_grades": "🎓 Which grades / levels can you teach?\n\nTap every one that applies (tap again to undo), then press ✅ Done.\nTop row: KG · then Grades 1-8 · then Grades 9-12.",
+        "ask_t_grades_text": "✏️ Type the grades or levels you teach (e.g. Grade 5-8, University):",
+        "grades_need_one": "Please pick at least one grade, or tap ✏️ Other to type it.",
+        "grades_saved": "✅ Grades: {grades}",
+        "btn_done": "✅ Done",
+        "btn_all_pri": "📘 All 1-8",
+        "btn_all_hs": "🏫 All 9-12",
         "ask_city": "📍 Which city are you in?",
         "adama": "Adama",
         "bishoftu": "Bishoftu",
@@ -1007,6 +1070,13 @@ TEXT = {
         "male": "ወንድ",
         "female": "ሴት",
         "ask_subject": "📚 የሚያስተምሩት ትምህርት(ቶች) ምንድን ናቸው? (ለምሳሌ ሒሳብ፣ ፊዚክስ፣ እንግሊዝኛ)",
+        "ask_t_grades": "🎓 የትኞቹን ክፍሎች / ደረጃዎች ማስተማር ይችላሉ?\n\nየሚያስተምሩትን ሁሉ ይንኩ (ለመሰረዝ እንደገና ይንኩ)፤ ከዚያ ✅ ጨርሻለሁ ይጫኑ።\nላይኛው ረድፍ፦ KG · ከዚያ 1-8ኛ ክፍል · ከዚያ 9-12ኛ ክፍል።",
+        "ask_t_grades_text": "✏️ የሚያስተምሩትን ክፍሎች / ደረጃዎች ይጻፉ (ለምሳሌ 5-8ኛ ክፍል፣ ዩኒቨርሲቲ)፦",
+        "grades_need_one": "ቢያንስ አንድ ክፍል ይምረጡ፤ ወይም ✏️ ሌላ ን ተጭነው ይጻፉ።",
+        "grades_saved": "✅ ክፍሎች፦ {grades}",
+        "btn_done": "✅ ጨርሻለሁ",
+        "btn_all_pri": "📘 ሁሉም 1-8",
+        "btn_all_hs": "🏫 ሁሉም 9-12",
         "ask_city": "📍 በየትኛው ከተማ ነው የሚኖሩት?",
         "adama": "አዳማ",
         "bishoftu": "ቢሾፍቱ",
@@ -1174,6 +1244,58 @@ def grade_pick_keyboard(context, sec_key: str):
     return InlineKeyboardMarkup(rows)
 
 
+# ---- tutor "which grades can you teach" (multi-select) ---------------------------------------
+TUTOR_GRADE_ORDER = [f"KG{n}" for n in (1, 2, 3)] + [f"G{n}" for n in range(1, 13)] + ["UNI"]
+PRI_CODES = [f"G{n}" for n in range(1, 9)]
+HS_CODES = [f"G{n}" for n in range(9, 13)]
+
+
+def format_grades(codes) -> str:
+    """['KG1','G4','G5','G6','G7','UNI'] -> 'KG 1, Grades 4-7, University / College' (sheet-friendly)."""
+    chosen = set(codes or ())
+
+    def runs(nums):
+        out, i = [], 0
+        while i < len(nums):
+            j = i
+            while j + 1 < len(nums) and nums[j + 1] == nums[j] + 1:
+                j += 1
+            out.append(nums[i:j + 1])
+            i = j + 1
+        return out
+
+    def render(prefix_one, prefix_many, nums):
+        parts = []
+        for r in runs(nums):
+            if len(r) >= 3:
+                parts.append(f"{prefix_many} {r[0]}-{r[-1]}")
+            else:
+                parts.extend(f"{prefix_one} {n}" for n in r)
+        return parts
+
+    kg = sorted(int(c[2:]) for c in chosen if re.fullmatch(r"KG[1-3]", c))
+    gr = sorted(int(c[1:]) for c in chosen if re.fullmatch(r"G(?:[1-9]|1[0-2])", c))
+    parts = render("KG", "KG", kg) + render("Grade", "Grades", gr)
+    if "UNI" in chosen:
+        parts.append(GRADE_LABELS["UNI"])
+    return ", ".join(parts)
+
+
+def tutor_grade_keyboard(context):
+    sel = context.user_data.get("t_grades") or set()
+    mark = lambda code, label: f"✅ {label}" if code in sel else label
+    kg = [InlineKeyboardButton(mark(f"KG{n}", f"KG{n}"), callback_data=f"tg:KG{n}") for n in (1, 2, 3)]
+    g = [InlineKeyboardButton(mark(f"G{n}", str(n)), callback_data=f"tg:G{n}") for n in range(1, 13)]
+    idx = 2 if lang_of(context) == "am" else 1
+    rows = [kg, g[0:4], g[4:8], g[8:12],
+            [InlineKeyboardButton(tr(context, "btn_all_pri"), callback_data="tg:ALL_PRI"),
+             InlineKeyboardButton(tr(context, "btn_all_hs"), callback_data="tg:ALL_HS")],
+            [InlineKeyboardButton(mark("UNI", UNI_GRADE[idx]), callback_data="tg:UNI")],
+            [InlineKeyboardButton(tr(context, "btn_type"), callback_data="tg:TYPE"),
+             InlineKeyboardButton(tr(context, "btn_done"), callback_data="tg:DONE")]]
+    return InlineKeyboardMarkup(rows)
+
+
 def gpref_keyboard(context):
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(tr(context, "pref_male"), callback_data="gpref:Male"),
@@ -1260,7 +1382,8 @@ def _is_admin_user(update: Update) -> bool:
 (LANG, MENU,
  T_NAME, T_PHONE, T_GENDER, T_SUBJECT, T_CITY, T_HOOD, T_ID,
  C_NAME, C_PHONE, C_GRADE, C_GRADE_TEXT, C_SUBJECT, C_CITY, C_HOOD, C_REQ, C_BUDGET,
- C_GRADE_PICK, C_GENDER, C_DAYS, C_DAYS_TEXT, C_HOURS, C_HOURS_TEXT) = range(24)
+ C_GRADE_PICK, C_GENDER, C_DAYS, C_DAYS_TEXT, C_HOURS, C_HOURS_TEXT,
+ T_GRADE, T_GRADE_TEXT) = range(26)
 
 PRIVATE = filters.ChatType.PRIVATE
 TEXT_ONLY = filters.TEXT & ~filters.COMMAND & PRIVATE
@@ -1417,6 +1540,60 @@ async def grade_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return C_SUBJECT
 
 
+async def tutor_grade_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    sel = context.user_data.setdefault("t_grades", set())
+    key = q.data.split(":", 1)[1]
+    if key in ("ALL_PRI", "ALL_HS"):
+        group = set(PRI_CODES if key == "ALL_PRI" else HS_CODES)
+        if group <= sel:
+            sel -= group
+        else:
+            sel |= group
+    elif key in TUTOR_GRADE_ORDER:
+        sel.symmetric_difference_update({key})
+    try:
+        await q.edit_message_reply_markup(reply_markup=tutor_grade_keyboard(context))
+    except Exception:
+        pass  # "message is not modified" etc. - harmless
+    return T_GRADE
+
+
+async def tutor_grade_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    await q.message.reply_text(tr(context, "ask_t_grades_text"))
+    return T_GRADE_TEXT
+
+
+async def tutor_grade_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    ud = context.user_data
+    if not ud.get("t_grades") and not ud.get("t_grades_typed"):
+        await q.answer(tr(context, "grades_need_one"), show_alert=True)
+        return T_GRADE
+    await q.answer()
+    await _drop_buttons(q)
+    await q.message.reply_text(tr(context, "grades_saved", grades=combined_tutor_grades(ud)))
+    await q.message.reply_text(tr(context, "ask_city"), reply_markup=city_keyboard(context))
+    return T_CITY
+
+
+def combined_tutor_grades(ud) -> str:
+    return ", ".join(x for x in (format_grades(ud.get("t_grades")), ud.get("t_grades_typed", "")) if x)
+
+
+async def tutor_grade_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    value = clean(update.message.text, 120)
+    if not value:
+        return T_GRADE_TEXT
+    context.user_data["t_grades_typed"] = value
+    await update.message.reply_text(tr(context, "grades_saved", grades=combined_tutor_grades(context.user_data)))
+    await update.message.reply_text(tr(context, "ask_city"), reply_markup=city_keyboard(context))
+    return T_CITY
+
+
 async def days_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
@@ -1520,7 +1697,7 @@ async def tutor_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Phone": ud["phone"],
             "Gender": ud["gender"],
             "Subjects": ud["subject"],
-            "Grades": "",
+            "Grades": combined_tutor_grades(ud),
             "Location": f"{ud['hood']}, {ud['city']}",
             "Qualification": "Not provided",
             "ID Verification Status": "Pending",
@@ -1541,6 +1718,7 @@ async def tutor_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"👤 {esc(ud['name'])}  |  {esc(ud['gender'])}\n"
             f"📞 {esc(ud['phone'])}\n"
             f"📚 {esc(ud['subject'])}\n"
+            f"🎓 {esc(combined_tutor_grades(ud) or '-')}\n"
             f"📍 {esc(ud['hood'])}, {esc(ud['city'])}\n"
         )
         if USE_DRIVE:
@@ -1822,6 +2000,8 @@ def app_card(app: dict, tutor=None) -> str:
     if tutor:
         lines.append(f"📚 {esc(tutor.get('Subjects', ''))} | 📍 {esc(tutor.get('Location', ''))} | "
                      f"{esc(tutor.get('Gender', ''))}")
+        if (tutor.get("Grades") or "").strip():
+            lines.append(f"🎓 {esc(tutor.get('Grades', ''))}")
     lines.append(f"🕒 {esc(app.get('Timestamp', ''))} · Status: <b>{esc(app.get('Status', ''))}</b>")
     return "\n".join(lines)
 
@@ -2242,15 +2422,21 @@ def build_application() -> Application:
             MENU: [CallbackQueryHandler(menu_choice, pattern=r"^menu:(tutor|client)$"),
                    MessageHandler(TEXT_ONLY, use_buttons(MENU))],
 
-            # ---- tutor: name -> phone -> gender -> subject -> city -> area -> ID photo (no grade) ----
+            # ---- tutor: name -> phone -> gender -> subject -> grades (multi-select) -> city -> area -> ID photo ----
             T_NAME: [MessageHandler(TEXT_ONLY, text_step(T_NAME, "name", T_PHONE, "ask_phone",
                                                          markup_fn=phone_keyboard))],
             T_PHONE: [MessageHandler(CONTACT_OR_TEXT, phone_step(T_PHONE, T_GENDER, "ask_gender", gender_keyboard))],
             T_GENDER: [CallbackQueryHandler(choice_step("gender", T_SUBJECT, "ask_subject"),
                                             pattern=r"^gender:(Male|Female)$"),
                        MessageHandler(TEXT_ONLY, use_buttons(T_GENDER))],
-            T_SUBJECT: [MessageHandler(TEXT_ONLY, text_step(T_SUBJECT, "subject", T_CITY, "ask_city",
-                                                            markup_fn=city_keyboard))],
+            T_SUBJECT: [MessageHandler(TEXT_ONLY, text_step(T_SUBJECT, "subject", T_GRADE, "ask_t_grades",
+                                                            markup_fn=tutor_grade_keyboard))],
+            T_GRADE: [CallbackQueryHandler(tutor_grade_toggle,
+                                           pattern=r"^tg:(KG[1-3]|G(?:[1-9]|1[0-2])|UNI|ALL_PRI|ALL_HS)$"),
+                      CallbackQueryHandler(tutor_grade_type, pattern=r"^tg:TYPE$"),
+                      CallbackQueryHandler(tutor_grade_done, pattern=r"^tg:DONE$"),
+                      MessageHandler(TEXT_ONLY, use_buttons(T_GRADE))],
+            T_GRADE_TEXT: [MessageHandler(TEXT_ONLY, tutor_grade_text)],
             T_CITY: [CallbackQueryHandler(choice_step("city", T_HOOD, "ask_hood"),
                                           pattern=r"^city:(Adama|Bishoftu)$"),
                      MessageHandler(TEXT_ONLY, use_buttons(T_CITY))],
